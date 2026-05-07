@@ -26,12 +26,16 @@ def build_variants(formula: str) -> FormulaVariants:
 
 
 def exact_formula_match(text: str, variants: FormulaVariants) -> bool:
+    if not text:
+        return False
     compact_pat = rf"(?<![A-Za-z]){re.escape(variants.compact)}(?![A-Za-z])"
     spaced_pat = rf"(?<![A-Za-z]){'\\s+'.join(re.escape(e) for e in variants.elements)}(?![A-Za-z])"
     hyphen_pat = rf"(?<![A-Za-z]){'-'.join(re.escape(e) for e in variants.elements)}(?![A-Za-z])"
+    alloy_pat = rf"(?<![A-Za-z]){re.escape(variants.compact)}(?:[-:/]?[A-Za-z0-9.()+,x]+)?(?:\s+(?:alloy|compound|based|type))?(?![A-Za-z])"
+    mixed_pat = rf"\({re.escape(variants.elements[0])},[A-Z][a-z]?\){re.escape(''.join(variants.elements[1:]))}"
     return any(
         re.search(pat, text) is not None
-        for pat in [compact_pat, spaced_pat, hyphen_pat]
+        for pat in [compact_pat, spaced_pat, hyphen_pat, alloy_pat, mixed_pat]
     )
 
 

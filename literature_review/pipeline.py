@@ -7,7 +7,7 @@ from .paths import INPUT_CSV, BACKUP_SQLITE, OUTPUT_DIR
 from .database import connect
 from .models import Coverage
 from .formula_variants import build_variants, exact_formula_match, permutation_formula_match, loose_element_system_match
-from .query_builder import gate1_queries, gate2_queries, gate3_queries, gate4_queries
+from .query_builder import gate1_queries, gate2_queries, gate3_queries, gate4_queries, profile_queries
 from .source_router import normalize_hits
 from .google_scholar_client import GoogleScholarClient
 from .openalex_client import OpenAlexClient
@@ -90,6 +90,9 @@ def run(
     db_path: Path = BACKUP_SQLITE,
     output_dir: Path = OUTPUT_DIR,
     enable_crossref: bool = False,
+    search_profile: str = "candidate_screening",
+    recall_second_pass: bool = False,
+    calibration_passed: bool = True,
 ):
     conn = connect(db_path)
     df = load_input(input_csv).head(top_n)
@@ -109,11 +112,8 @@ def run(
         all_hits = []
         completed_query_count = 0
 
-        gates = [
-            ("gate1", gate1_queries(variants)),
-            ("gate2", gate2_queries(variants)),
-            ("gate3", gate3_queries(variants)),
-        ]
+        prof = profile_queries(variants, search_profile)
+        gates = [("gate1", prof["gate1"]), ("gate2", prof["gate2"]), ("gate3", prof["gate3"]) ]
         for gate, queries in gates:
             for q in queries:
                 print(f"  {gate} query: {q}")
@@ -161,6 +161,9 @@ def run(
             cov.permutation_checked = True
 
         feat = {"multi_source": len({h.source for h in all_hits}) > 1}
+        second_pass_used=False
+        second_pass_formula_hits=0
+        second_pass_dft_hits=0
         false_positive_count = 0
         valid_hits = []
         exact_formula_hit_count = 0
@@ -211,12 +214,26 @@ def run(
         complete = cov.google_scholar_checked and cov.openalex_checked
         has_exact_or_perm = feat.get("exact_title") or feat.get("exact_snippet") or feat.get("perm_match")
         formula_level_evidence_found = bool(has_exact_or_perm and false_positive_count == 0)
+        if recall_second_pass and search_profile == "validation_recall" and not formula_level_evidence_found:
+            second_pass_used=True
+            for q in [f"\"{variants.compact}\" half-Heusler", f"\"{variants.compact}\" thermoelectric", f"\"{variants.compact}\" DFT", f"\"{variants.compact}\" first principles", f"\"{variants.compact}\" electronic structure", f"\"{variants.compact}\" band structure"]:
+                h, _, _ = _run_query(conn, material, "gate_second_pass", "google_scholar", q, gsch.search)
+                for hit in h:
+                    t=f"{hit.title} {hit.snippet} {hit.abstract}"
+                    if exact_formula_match(t, variants): second_pass_formula_hits += 1
+                    if exact_formula_match(t, variants) and contains_any(t, DFT_STRONG_TERMS): second_pass_dft_hits += 1
+                all_hits.extend(h)
+            formula_level_evidence_found = formula_level_evidence_found or second_pass_formula_hits > 0
+            dft_formula_hit_count += second_pass_dft_hits
+
         if dft_formula_hit_count > 0 and formula_level_evidence_found:
             label, reason = "reported_dft", "exact/permutation formula + DFT context"
         elif formula_level_evidence_found:
             label, reason = "reported_non_dft", "formula-level evidence without DFT"
-        elif complete and exact_formula_hit_count == 0 and dft_formula_hit_count == 0 and not formula_level_evidence_found:
+        elif complete and exact_formula_hit_count == 0 and dft_formula_hit_count == 0 and not formula_level_evidence_found and calibration_passed:
             label, reason = "not_found_after_protocol", "no exact formula-level literature evidence found; only weak element-system hits"
+        elif complete and not calibration_passed:
+            label, reason = "incomplete_search_retry_needed", "PIPELINE_NOT_CALIBRATED: Do not use not_found_after_protocol as novelty evidence until validation passes."
         else:
             label, reason = classify({"reported_evidence_score": reported, "unreported_confidence_score": unreported}, complete, False)
         if (not complete) or (not any(h.source == "google_scholar" for h in all_hits) and not any(h.source == "openalex" for h in all_hits) and failed_sources):
@@ -268,6 +285,14 @@ def run(
             "exact_formula_hit_count": exact_formula_hit_count,
             "dft_formula_hit_count": dft_formula_hit_count,
             "formula_level_evidence_found": formula_level_evidence_found,
+            "novelty_confidence_tier": "REPORTED_DFT" if label=="reported_dft" else ("REPORTED_NON_DFT" if label=="reported_non_dft" else ("INCOMPLETE_SEARCH" if label=="incomplete_search_retry_needed" else ("AMBIGUOUS_REVIEW_REQUIRED" if label=="ambiguous_manual_review" else ("HIGH_CONFIDENCE_UNREPORTED" if calibration_passed else "LOW_CONFIDENCE_UNREPORTED")))),
+            "contains_radioactive_element": any(e in material for e in ["Ac","Pa","Np","Pu","Pm","U","Th","Tc"]),
+            "radioactive_elements": ",".join([e for e in ["Ac","Pa","Np","Pu","Pm","U","Th","Tc"] if e in material]),
+            "contains_highly_toxic_element": any(e in material for e in ["U","Pa","Pu","Np"]),
+            "practicality_tier": "RADIOACTIVE_REVIEW" if any(e in material for e in ["Ac","Pa","Np","Pu","Pm","U","Th","Tc"]) else "PRACTICAL_PRIORITY",
+            "second_pass_used": second_pass_used,
+            "second_pass_formula_hits": second_pass_formula_hits,
+            "second_pass_dft_hits": second_pass_dft_hits,
             "final_manual_label": "",
             "reviewer_notes": "",
         })
