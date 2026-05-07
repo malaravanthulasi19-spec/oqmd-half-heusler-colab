@@ -36,3 +36,10 @@ Known expected raw count is about **3117** entries.
 
 - No secrets or API keys are stored in source code.
 - Do not commit local credentials or Colab auth tokens.
+
+## Reproducibility
+
+- [REPRODUCE.md](REPRODUCE.md)
+- [RUN_RECORD.md](RUN_RECORD.md)
+- [CODEX_PROMPTS.md](CODEX_PROMPTS.md)
+- [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
