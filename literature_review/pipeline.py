@@ -15,14 +15,30 @@ from .semantic_scholar_client import SemanticScholarClient
 from .crossref_client import CrossrefClient
 from .evidence_scoring import contains_any, score_reported_evidence, score_unreported_confidence
 from .constants import DFT_KEYWORDS, PROTOTYPE_KEYWORDS, ELEC_KEYWORDS, FORM_ENERGY_KEYWORDS
+
+FALSE_POSITIVE_TERMS = ["candu", "nandu river", "gdpr", "data protection", "lyapunov", "microplastic", "river", "thermalhydraulic code"]
 from .classification import classify
-from .coverage import coverage_complete
 from .checkpoint import is_query_completed, mark_query_completed
 from .export import export_outputs
 
 
 def load_input(path: Path = INPUT_CSV):
     return pd.read_csv(path)
+
+
+def _first_present_column(row: pd.Series, candidates: list[str]):
+    for col in candidates:
+        if col in row.index and pd.notna(row[col]) and str(row[col]).strip():
+            return row[col]
+    return None
+
+
+def _extract_material(row: pd.Series) -> str:
+    candidates = ["Material", "material", "Formula", "formula", "Composition", "composition"]
+    value = _first_present_column(row, candidates)
+    if value is None:
+        raise ValueError(f"No material/formula column found. Available columns: {list(row.index)}")
+    return str(value).strip()
 
 
 def _run_query(conn, material: str, gate: str, source: str, query: str, search_fn):
@@ -47,8 +63,8 @@ def _run_query(conn, material: str, gate: str, source: str, query: str, search_f
         mark_query_completed(conn, material, gate, source, query)
         conn.commit()
         return hits, False, False
-    except Exception:
-        return [], False, True
+    except Exception as exc:
+        return [], False, str(exc)
 
 
 def run(top_n: int = 10, input_csv: Path = INPUT_CSV, db_path: Path = BACKUP_SQLITE, output_dir: Path = OUTPUT_DIR):
@@ -61,12 +77,14 @@ def run(top_n: int = 10, input_csv: Path = INPUT_CSV, db_path: Path = BACKUP_SQL
     cref = CrossrefClient()
 
     rows = []
-    for _, r in df.iterrows():
-        material = str(r.get("material") or r.get("formula") or r.iloc[0])
+    for idx, r in df.iterrows():
+        material = _extract_material(r)
+        print(f"Processing {idx + 1}/{len(df)}: {material}")
         variants = build_variants(material)
         cov = Coverage()
-        source_errors = False
+        failed_sources: set[str] = set()
         all_hits = []
+        completed_query_count = 0
 
         gates = [
             ("gate1", gate1_queries(variants)),
@@ -75,47 +93,94 @@ def run(top_n: int = 10, input_csv: Path = INPUT_CSV, db_path: Path = BACKUP_SQL
         ]
         for gate, queries in gates:
             for q in queries:
+                print(f"  {gate} query: {q}")
                 h, _, err = _run_query(conn, material, gate, "google_scholar", q, gsch.search)
                 all_hits.extend(h)
-                source_errors = source_errors or err
+                if err:
+                    failed_sources.add(f"google_scholar:{err}")
+                else:
+                    completed_query_count += 1
                 h, _, err = _run_query(conn, material, gate, "openalex", q, oalex.search)
                 all_hits.extend(h)
-                source_errors = source_errors or err
+                if err:
+                    failed_sources.add(f"openalex:{err}")
+                else:
+                    completed_query_count += 1
                 h, _, err = _run_query(conn, material, gate, "semantic_scholar", q, sem.search)
                 all_hits.extend(h)
-                source_errors = source_errors or err
+                if err:
+                    failed_sources.add(f"semantic_scholar:{err}")
+                else:
+                    completed_query_count += 1
                 h, _, err = _run_query(conn, material, gate, "crossref", q, cref.search)
                 all_hits.extend(h)
-                source_errors = source_errors or err
+                if err:
+                    failed_sources.add(f"crossref:{err}")
+                else:
+                    completed_query_count += 1
 
         cov.google_scholar_checked = True
         cov.openalex_checked = True
-        cov.semantic_scholar_checked = True
-        cov.crossref_checked = True
-        cov.source_error = source_errors
+        cov.semantic_scholar_checked = not any(x.startswith("semantic_scholar:") for x in failed_sources)
+        cov.crossref_checked = not any(x.startswith("crossref:") for x in failed_sources)
+        cov.source_error = bool(failed_sources)
 
         has_strong = any(exact_formula_match((h.title + " " + h.snippet + " " + h.abstract), variants) and contains_any((h.title + " " + h.snippet + " " + h.abstract), DFT_KEYWORDS) for h in all_hits)
         if not has_strong:
             for q in gate4_queries(variants):
                 h, _, err = _run_query(conn, material, "gate4", "google_scholar", q, gsch.search)
                 all_hits.extend(h)
-                source_errors = source_errors or err
+                if err:
+                    failed_sources.add(f"google_scholar:{err}")
+                else:
+                    completed_query_count += 1
             cov.permutation_checked = True
 
         feat = {"multi_source": len({h.source for h in all_hits}) > 1}
+        best_hit = None
+        best_score = -1
+        false_positive_count = 0
+        valid_evidence_hit_count = 0
+        exact_formula_hit_count = 0
+        dft_formula_hit_count = 0
         for h in all_hits:
             txt = f"{h.title} {h.snippet} {h.abstract}"
+            exact = exact_formula_match(txt, variants)
+            perm = permutation_formula_match(txt, variants)
+            dft = contains_any(txt, DFT_KEYWORDS)
+            prototype = contains_any(txt, PROTOTYPE_KEYWORDS)
+            fp_term = any(t in txt.lower() for t in FALSE_POSITIVE_TERMS)
+            strong_context = exact or perm or prototype or dft
+            false_positive = fp_term and not strong_context
+            if false_positive:
+                false_positive_count += 1
+                continue
+            if exact:
+                exact_formula_hit_count += 1
+            if (exact or perm) and dft:
+                dft_formula_hit_count += 1
+            is_element_only = loose_element_system_match(txt, variants) and not (exact or perm)
+            if not is_element_only:
+                valid_evidence_hit_count += 1
             feat["exact_title"] = feat.get("exact_title", False) or exact_formula_match(h.title, variants)
             feat["exact_snippet"] = feat.get("exact_snippet", False) or exact_formula_match(h.snippet, variants)
-            feat["perm_match"] = feat.get("perm_match", False) or permutation_formula_match(txt, variants)
-            feat["only_elements"] = feat.get("only_elements", False) or (loose_element_system_match(txt, variants) and not exact_formula_match(txt, variants))
-            feat["dft"] = feat.get("dft", False) or contains_any(txt, DFT_KEYWORDS)
-            feat["prototype"] = feat.get("prototype", False) or contains_any(txt, PROTOTYPE_KEYWORDS)
+            feat["perm_match"] = feat.get("perm_match", False) or perm
+            feat["only_elements"] = feat.get("only_elements", False) or is_element_only
+            feat["dft"] = feat.get("dft", False) or dft
+            feat["prototype"] = feat.get("prototype", False) or prototype
             feat["elec"] = feat.get("elec", False) or contains_any(txt, ELEC_KEYWORDS)
             feat["formation"] = feat.get("formation", False) or contains_any(txt, FORM_ENERGY_KEYWORDS)
             feat["doi"] = feat.get("doi", False) or bool(h.doi)
+            score = (50 if (exact or perm) else 0) + (30 if dft else 0) + (10 if prototype else 0) + (5 if bool(h.doi) else 0)
+            if (not is_element_only) and score > best_score:
+                best_score = score
+                best_hit = h
 
         reported = score_reported_evidence(feat)
+        if not ((feat.get("exact_title") or feat.get("exact_snippet") or feat.get("perm_match")) and feat.get("dft")):
+            reported = min(reported, 44)
+        if not (feat.get("exact_title") or feat.get("exact_snippet") or feat.get("perm_match")):
+            reported = min(reported, 24)
         unreported = score_unreported_confidence({
             "exact_dft": feat.get("exact_title") and feat.get("dft"),
             "exact_no_dft": feat.get("exact_title") and not feat.get("dft"),
@@ -128,8 +193,10 @@ def run(top_n: int = 10, input_csv: Path = INPUT_CSV, db_path: Path = BACKUP_SQL
             "permutation_checked": cov.permutation_checked,
         })
 
-        complete = coverage_complete(cov)
-        label, reason = classify({"reported_evidence_score": reported, "unreported_confidence_score": unreported}, complete, source_errors)
+        complete = cov.google_scholar_checked and cov.openalex_checked
+        label, reason = classify({"reported_evidence_score": reported, "unreported_confidence_score": unreported}, complete, False)
+        if (not complete) or (not any(h.source == "google_scholar" for h in all_hits) and not any(h.source == "openalex" for h in all_hits) and failed_sources):
+            label, reason = "incomplete_search_retry_needed", "required sources/gates incomplete"
 
         conn.execute(
             "INSERT OR REPLACE INTO classifications(material, automated_status, reported_evidence_score, unreported_confidence_score, reason) VALUES(?,?,?,?,?)",
@@ -137,11 +204,47 @@ def run(top_n: int = 10, input_csv: Path = INPUT_CSV, db_path: Path = BACKUP_SQL
         )
         conn.execute(
             "INSERT OR REPLACE INTO coverage(material,google_scholar_checked,openalex_checked,semantic_scholar_checked,crossref_checked,permutation_checked,citation_neighbor_checked,full_text_checked,source_error) VALUES(?,?,?,?,?,?,?,?,?)",
-            (material, int(cov.google_scholar_checked), int(cov.openalex_checked), int(cov.semantic_scholar_checked), int(cov.crossref_checked), int(cov.permutation_checked), 0, 0, int(source_errors)),
+            (material, int(cov.google_scholar_checked), int(cov.openalex_checked), int(cov.semantic_scholar_checked), int(cov.crossref_checked), int(cov.permutation_checked), 0, 0, int(bool(failed_sources))),
         )
         conn.commit()
 
-        rows.append({"Material": material, "Automated Status": label, "Reported Evidence Score": reported, "Unreported Confidence Score": unreported, "Reason": reason})
+        print(f"  source status: gs={cov.google_scholar_checked} oa={cov.openalex_checked} sem={cov.semantic_scholar_checked} cr={cov.crossref_checked}")
+        print(f"  hit count: {len(all_hits)}")
+        print(f"  final label: {label}")
+        rows.append({
+            "Rank": r.get("Rank"),
+            "Material": material,
+            "Band Gap (eV)": r.get("Band Gap (eV)"),
+            "Stability": r.get("Stability"),
+            "OQMD Entry ID": r.get("OQMD Entry ID"),
+            "Space Group": r.get("Space Group"),
+            "Automated Status": label,
+            "Reported Evidence Score": reported,
+            "Unreported Confidence Score": unreported,
+            "Reason": reason,
+            "google_scholar_checked": cov.google_scholar_checked,
+            "openalex_checked": cov.openalex_checked,
+            "semantic_scholar_checked": cov.semantic_scholar_checked,
+            "crossref_checked": cov.crossref_checked,
+            "permutation_checked": cov.permutation_checked,
+            "citation_neighbor_checked": cov.citation_neighbor_checked,
+            "full_text_checked": cov.full_text_checked,
+            "source_error": cov.source_error,
+            "failed_sources": " | ".join(sorted(failed_sources)),
+            "completed_query_count": completed_query_count,
+            "hit_count": len(all_hits),
+            "best_paper_title": best_hit.title if best_hit else "",
+            "best_doi": best_hit.doi if best_hit else "",
+            "best_url": best_hit.url if best_hit else "",
+            "best_evidence_match_type": "dft_formula" if dft_formula_hit_count > 0 else ("exact_formula" if exact_formula_hit_count > 0 else "weak_or_none"),
+            "best_evidence_source": best_hit.source if best_hit else "",
+            "false_positive_count": false_positive_count,
+            "valid_evidence_hit_count": valid_evidence_hit_count,
+            "exact_formula_hit_count": exact_formula_hit_count,
+            "dft_formula_hit_count": dft_formula_hit_count,
+            "final_manual_label": "",
+            "reviewer_notes": "",
+        })
 
     out_df = pd.DataFrame(rows)
     export_outputs(out_df, Path(output_dir))

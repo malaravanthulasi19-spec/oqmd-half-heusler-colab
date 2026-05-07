@@ -26,13 +26,17 @@ def build_variants(formula: str) -> FormulaVariants:
 
 
 def exact_formula_match(text: str, variants: FormulaVariants) -> bool:
-    t = text.lower()
-    return any(v.lower() in t for v in [variants.compact, variants.spaced, variants.hyphenated])
+    compact = re.compile(rf"(?<![A-Za-z]){re.escape(variants.compact)}(?![A-Za-z])")
+    spaced = re.compile(rf"(?<![A-Za-z]){re.escape(variants.spaced)}(?![A-Za-z])")
+    hyphenated = re.compile(rf"(?<![A-Za-z]){re.escape(variants.hyphenated)}(?![A-Za-z])")
+    return bool(compact.search(text) or spaced.search(text) or hyphenated.search(text))
 
 
 def permutation_formula_match(text: str, variants: FormulaVariants) -> bool:
-    t = text.lower()
-    return any(p.lower() in t for p in variants.permutations)
+    for p in variants.permutations:
+        if re.search(rf"(?<![A-Za-z]){re.escape(p)}(?![A-Za-z])", text):
+            return True
+    return False
 
 
 def loose_element_system_match(text: str, variants: FormulaVariants) -> bool:
