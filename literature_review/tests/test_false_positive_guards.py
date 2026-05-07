@@ -71,6 +71,47 @@ def test_failed_sources_deduplicated(tmp_path, monkeypatch):
     inp = tmp_path / 'input.csv'
     pd.DataFrame([{"Material": "CaNdU"}]).to_csv(inp, index=False)
     out_dir = tmp_path / 'out'
-    run(top_n=1, input_csv=inp, db_path=tmp_path / 'd.sqlite3', output_dir=out_dir)
+    run(top_n=1, input_csv=inp, db_path=tmp_path / 'd.sqlite3', output_dir=out_dir, enable_crossref=True)
     df = pd.read_csv(out_dir / '05_all_hits_audit.csv')
     assert df.iloc[0]['failed_sources'].count('crossref:source down') == 1
+
+
+def test_element_system_weak_only_becomes_not_found_after_protocol(tmp_path, monkeypatch):
+    class Weak:
+        def search(self, query, **kwargs):
+            return [{"title": "barium terbium protactinium thermoelectric alloy study", "snippet": "elements in alloy family", "doi": ""}]
+
+    monkeypatch.setattr('literature_review.pipeline.GoogleScholarClient', lambda: Weak())
+    monkeypatch.setattr('literature_review.pipeline.OpenAlexClient', lambda: Weak())
+    monkeypatch.setattr('literature_review.pipeline.SemanticScholarClient', lambda: Weak())
+    monkeypatch.setattr('literature_review.pipeline.CrossrefClient', lambda: Weak())
+    inp = tmp_path / 'input.csv'
+    pd.DataFrame([{"Material": "BaTbPa"}]).to_csv(inp, index=False)
+    out_dir = tmp_path / 'out'
+    run(top_n=1, input_csv=inp, db_path=tmp_path / 'd.sqlite3', output_dir=out_dir)
+    df = pd.read_csv(out_dir / '05_all_hits_audit.csv')
+    assert df.iloc[0]['google_scholar_checked']
+    assert df.iloc[0]['openalex_checked']
+    assert df.iloc[0]['exact_formula_hit_count'] == 0
+    assert df.iloc[0]['dft_formula_hit_count'] == 0
+    assert not df.iloc[0]['formula_level_evidence_found']
+    assert df.iloc[0]['Automated Status'] == 'not_found_after_protocol'
+    assert str(df.iloc[0]['best_evidence_match_type']) in {'element_system_weak', 'nan'}
+    assert str(df.iloc[0]['best_paper_title']) == 'nan'
+
+
+def test_reported_labels_require_formula_level_evidence(tmp_path, monkeypatch):
+    class NonFormulaDft:
+        def search(self, query, **kwargs):
+            return [{"title": "electronic structure of barium-terbium-protactinium alloys", "snippet": "density functional theory", "doi": "10.1/x"}]
+
+    monkeypatch.setattr('literature_review.pipeline.GoogleScholarClient', lambda: NonFormulaDft())
+    monkeypatch.setattr('literature_review.pipeline.OpenAlexClient', lambda: NonFormulaDft())
+    monkeypatch.setattr('literature_review.pipeline.SemanticScholarClient', lambda: NonFormulaDft())
+    monkeypatch.setattr('literature_review.pipeline.CrossrefClient', lambda: NonFormulaDft())
+    inp = tmp_path / 'input.csv'
+    pd.DataFrame([{"Material": "BaTbPa"}]).to_csv(inp, index=False)
+    out_dir = tmp_path / 'out'
+    run(top_n=1, input_csv=inp, db_path=tmp_path / 'd2.sqlite3', output_dir=out_dir)
+    df = pd.read_csv(out_dir / '05_all_hits_audit.csv')
+    assert df.iloc[0]['Automated Status'] == 'not_found_after_protocol'
