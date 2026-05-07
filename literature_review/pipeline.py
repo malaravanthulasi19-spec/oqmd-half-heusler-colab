@@ -25,6 +25,21 @@ def load_input(path: Path = INPUT_CSV):
     return pd.read_csv(path)
 
 
+def _first_present_column(row: pd.Series, candidates: list[str]):
+    for col in candidates:
+        if col in row.index and pd.notna(row[col]) and str(row[col]).strip():
+            return row[col]
+    return None
+
+
+def _extract_material(row: pd.Series) -> str:
+    candidates = ["Material", "material", "Formula", "formula", "Composition", "composition"]
+    value = _first_present_column(row, candidates)
+    if value is None:
+        raise ValueError(f"No material/formula column found. Available columns: {list(row.index)}")
+    return str(value).strip()
+
+
 def _run_query(conn, material: str, gate: str, source: str, query: str, search_fn):
     if is_query_completed(conn, material, gate, source, query):
         rows = conn.execute(
@@ -47,8 +62,8 @@ def _run_query(conn, material: str, gate: str, source: str, query: str, search_f
         mark_query_completed(conn, material, gate, source, query)
         conn.commit()
         return hits, False, False
-    except Exception:
-        return [], False, True
+    except Exception as exc:
+        return [], False, str(exc)
 
 
 def run(top_n: int = 10, input_csv: Path = INPUT_CSV, db_path: Path = BACKUP_SQLITE, output_dir: Path = OUTPUT_DIR):
@@ -61,12 +76,14 @@ def run(top_n: int = 10, input_csv: Path = INPUT_CSV, db_path: Path = BACKUP_SQL
     cref = CrossrefClient()
 
     rows = []
-    for _, r in df.iterrows():
-        material = str(r.get("material") or r.get("formula") or r.iloc[0])
+    for idx, r in df.iterrows():
+        material = _extract_material(r)
+        print(f"Processing {idx + 1}/{len(df)}: {material}")
         variants = build_variants(material)
         cov = Coverage()
-        source_errors = False
+        failed_sources: list[str] = []
         all_hits = []
+        completed_query_count = 0
 
         gates = [
             ("gate1", gate1_queries(variants)),
@@ -75,31 +92,47 @@ def run(top_n: int = 10, input_csv: Path = INPUT_CSV, db_path: Path = BACKUP_SQL
         ]
         for gate, queries in gates:
             for q in queries:
+                print(f"  {gate} query: {q}")
                 h, _, err = _run_query(conn, material, gate, "google_scholar", q, gsch.search)
                 all_hits.extend(h)
-                source_errors = source_errors or err
+                if err:
+                    failed_sources.append(f"google_scholar:{err}")
+                else:
+                    completed_query_count += 1
                 h, _, err = _run_query(conn, material, gate, "openalex", q, oalex.search)
                 all_hits.extend(h)
-                source_errors = source_errors or err
+                if err:
+                    failed_sources.append(f"openalex:{err}")
+                else:
+                    completed_query_count += 1
                 h, _, err = _run_query(conn, material, gate, "semantic_scholar", q, sem.search)
                 all_hits.extend(h)
-                source_errors = source_errors or err
+                if err:
+                    failed_sources.append(f"semantic_scholar:{err}")
+                else:
+                    completed_query_count += 1
                 h, _, err = _run_query(conn, material, gate, "crossref", q, cref.search)
                 all_hits.extend(h)
-                source_errors = source_errors or err
+                if err:
+                    failed_sources.append(f"crossref:{err}")
+                else:
+                    completed_query_count += 1
 
         cov.google_scholar_checked = True
         cov.openalex_checked = True
-        cov.semantic_scholar_checked = True
-        cov.crossref_checked = True
-        cov.source_error = source_errors
+        cov.semantic_scholar_checked = not any(x.startswith("semantic_scholar:") for x in failed_sources)
+        cov.crossref_checked = not any(x.startswith("crossref:") for x in failed_sources)
+        cov.source_error = bool(failed_sources)
 
         has_strong = any(exact_formula_match((h.title + " " + h.snippet + " " + h.abstract), variants) and contains_any((h.title + " " + h.snippet + " " + h.abstract), DFT_KEYWORDS) for h in all_hits)
         if not has_strong:
             for q in gate4_queries(variants):
                 h, _, err = _run_query(conn, material, "gate4", "google_scholar", q, gsch.search)
                 all_hits.extend(h)
-                source_errors = source_errors or err
+                if err:
+                    failed_sources.append(f"google_scholar:{err}")
+                else:
+                    completed_query_count += 1
             cov.permutation_checked = True
 
         feat = {"multi_source": len({h.source for h in all_hits}) > 1}
@@ -128,8 +161,10 @@ def run(top_n: int = 10, input_csv: Path = INPUT_CSV, db_path: Path = BACKUP_SQL
             "permutation_checked": cov.permutation_checked,
         })
 
-        complete = coverage_complete(cov)
-        label, reason = classify({"reported_evidence_score": reported, "unreported_confidence_score": unreported}, complete, source_errors)
+        complete = cov.google_scholar_checked and cov.openalex_checked
+        label, reason = classify({"reported_evidence_score": reported, "unreported_confidence_score": unreported}, complete, False)
+        if (not complete) or (not any(h.source == "google_scholar" for h in all_hits) and not any(h.source == "openalex" for h in all_hits) and failed_sources):
+            label, reason = "incomplete_search_retry_needed", "required sources/gates incomplete"
 
         conn.execute(
             "INSERT OR REPLACE INTO classifications(material, automated_status, reported_evidence_score, unreported_confidence_score, reason) VALUES(?,?,?,?,?)",
@@ -137,11 +172,41 @@ def run(top_n: int = 10, input_csv: Path = INPUT_CSV, db_path: Path = BACKUP_SQL
         )
         conn.execute(
             "INSERT OR REPLACE INTO coverage(material,google_scholar_checked,openalex_checked,semantic_scholar_checked,crossref_checked,permutation_checked,citation_neighbor_checked,full_text_checked,source_error) VALUES(?,?,?,?,?,?,?,?,?)",
-            (material, int(cov.google_scholar_checked), int(cov.openalex_checked), int(cov.semantic_scholar_checked), int(cov.crossref_checked), int(cov.permutation_checked), 0, 0, int(source_errors)),
+            (material, int(cov.google_scholar_checked), int(cov.openalex_checked), int(cov.semantic_scholar_checked), int(cov.crossref_checked), int(cov.permutation_checked), 0, 0, int(bool(failed_sources))),
         )
         conn.commit()
 
-        rows.append({"Material": material, "Automated Status": label, "Reported Evidence Score": reported, "Unreported Confidence Score": unreported, "Reason": reason})
+        print(f"  source status: gs={cov.google_scholar_checked} oa={cov.openalex_checked} sem={cov.semantic_scholar_checked} cr={cov.crossref_checked}")
+        print(f"  hit count: {len(all_hits)}")
+        print(f"  final label: {label}")
+        rows.append({
+            "Rank": r.get("Rank"),
+            "Material": material,
+            "Band Gap (eV)": r.get("Band Gap (eV)"),
+            "Stability": r.get("Stability"),
+            "OQMD Entry ID": r.get("OQMD Entry ID"),
+            "Space Group": r.get("Space Group"),
+            "Automated Status": label,
+            "Reported Evidence Score": reported,
+            "Unreported Confidence Score": unreported,
+            "Reason": reason,
+            "google_scholar_checked": cov.google_scholar_checked,
+            "openalex_checked": cov.openalex_checked,
+            "semantic_scholar_checked": cov.semantic_scholar_checked,
+            "crossref_checked": cov.crossref_checked,
+            "permutation_checked": cov.permutation_checked,
+            "citation_neighbor_checked": cov.citation_neighbor_checked,
+            "full_text_checked": cov.full_text_checked,
+            "source_error": cov.source_error,
+            "failed_sources": " | ".join(failed_sources),
+            "completed_query_count": completed_query_count,
+            "hit_count": len(all_hits),
+            "best_paper_title": all_hits[0].title if all_hits else "",
+            "best_doi": all_hits[0].doi if all_hits else "",
+            "best_url": all_hits[0].url if all_hits else "",
+            "final_manual_label": "",
+            "reviewer_notes": "",
+        })
 
     out_df = pd.DataFrame(rows)
     export_outputs(out_df, Path(output_dir))
