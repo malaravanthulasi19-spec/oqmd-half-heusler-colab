@@ -84,7 +84,13 @@ def _run_query(conn, material: str, gate: str, source: str, query: str, search_f
         return [], False, str(exc)
 
 
-def run(top_n: int = 10, input_csv: Path = INPUT_CSV, db_path: Path = BACKUP_SQLITE, output_dir: Path = OUTPUT_DIR):
+def run(
+    top_n: int = 10,
+    input_csv: Path = INPUT_CSV,
+    db_path: Path = BACKUP_SQLITE,
+    output_dir: Path = OUTPUT_DIR,
+    enable_crossref: bool = False,
+):
     conn = connect(db_path)
     df = load_input(input_csv).head(top_n)
 
@@ -129,12 +135,13 @@ def run(top_n: int = 10, input_csv: Path = INPUT_CSV, db_path: Path = BACKUP_SQL
                     failed_sources.add(f"semantic_scholar:{err}")
                 else:
                     completed_query_count += 1
-                h, _, err = _run_query(conn, material, gate, "crossref", q, cref.search)
-                all_hits.extend(h)
-                if err:
-                    failed_sources.add(f"crossref:{err}")
-                else:
-                    completed_query_count += 1
+                if enable_crossref and gate == "gate1":
+                    h, _, err = _run_query(conn, material, gate, "crossref", q, cref.search)
+                    all_hits.extend(h)
+                    if err:
+                        failed_sources.add(f"crossref:{err}")
+                    else:
+                        completed_query_count += 1
 
         cov.google_scholar_checked = True
         cov.openalex_checked = True
@@ -183,7 +190,7 @@ def run(top_n: int = 10, input_csv: Path = INPUT_CSV, db_path: Path = BACKUP_SQL
 
             if (exact or perm) and not false_positive:
                 valid_hits.append((3 if dft else 2, "exact_or_perm_formula", h))
-            elif feat["only_elements"] and not false_positive:
+            elif loose_element_system_match(txt, variants) and not false_positive:
                 valid_hits.append((1, "element_system_weak", h))
 
         valid_hits.sort(key=lambda x: x[0], reverse=True)
@@ -203,10 +210,13 @@ def run(top_n: int = 10, input_csv: Path = INPUT_CSV, db_path: Path = BACKUP_SQL
 
         complete = cov.google_scholar_checked and cov.openalex_checked
         has_exact_or_perm = feat.get("exact_title") or feat.get("exact_snippet") or feat.get("perm_match")
-        if dft_formula_hit_count > 0 and has_exact_or_perm and false_positive_count == 0:
+        formula_level_evidence_found = bool(has_exact_or_perm and false_positive_count == 0)
+        if dft_formula_hit_count > 0 and formula_level_evidence_found:
             label, reason = "reported_dft", "exact/permutation formula + DFT context"
-        elif has_exact_or_perm and false_positive_count == 0:
+        elif formula_level_evidence_found:
             label, reason = "reported_non_dft", "formula-level evidence without DFT"
+        elif complete and exact_formula_hit_count == 0 and dft_formula_hit_count == 0 and not formula_level_evidence_found:
+            label, reason = "not_found_after_protocol", "no exact formula-level literature evidence found; only weak element-system hits"
         else:
             label, reason = classify({"reported_evidence_score": reported, "unreported_confidence_score": unreported}, complete, False)
         if (not complete) or (not any(h.source == "google_scholar" for h in all_hits) and not any(h.source == "openalex" for h in all_hits) and failed_sources):
@@ -225,6 +235,7 @@ def run(top_n: int = 10, input_csv: Path = INPUT_CSV, db_path: Path = BACKUP_SQL
         print(f"  source status: gs={cov.google_scholar_checked} oa={cov.openalex_checked} sem={cov.semantic_scholar_checked} cr={cov.crossref_checked}")
         print(f"  hit count: {len(all_hits)}")
         print(f"  final label: {label}")
+        best_hit = valid_hits[0] if valid_hits and valid_hits[0][1] != "element_system_weak" else None
         rows.append({
             "Rank": r.get("Rank"),
             "Material": material,
@@ -247,15 +258,16 @@ def run(top_n: int = 10, input_csv: Path = INPUT_CSV, db_path: Path = BACKUP_SQL
             "failed_sources": " | ".join(sorted(failed_sources)),
             "completed_query_count": completed_query_count,
             "hit_count": len(all_hits),
-            "best_paper_title": valid_hits[0][2].title if valid_hits else "",
-            "best_doi": valid_hits[0][2].doi if valid_hits else "",
-            "best_url": valid_hits[0][2].url if valid_hits else "",
+            "best_paper_title": best_hit[2].title if best_hit else "",
+            "best_doi": best_hit[2].doi if best_hit else "",
+            "best_url": best_hit[2].url if best_hit else "",
             "best_evidence_match_type": valid_hits[0][1] if valid_hits else "",
             "best_evidence_source": valid_hits[0][2].source if valid_hits else "",
             "false_positive_count": false_positive_count,
             "valid_evidence_hit_count": len(valid_hits),
             "exact_formula_hit_count": exact_formula_hit_count,
             "dft_formula_hit_count": dft_formula_hit_count,
+            "formula_level_evidence_found": formula_level_evidence_found,
             "final_manual_label": "",
             "reviewer_notes": "",
         })

@@ -61,11 +61,29 @@ def test_failed_sources_exported_and_optional_sources_not_blocking(tmp_path, mon
     inp = tmp_path / 'input.csv'
     pd.DataFrame([{"Material": "BaTbPa"}]).to_csv(inp, index=False)
     out_dir = tmp_path / 'out'
-    run(top_n=10, input_csv=inp, db_path=tmp_path / 'd2.sqlite3', output_dir=out_dir)
+    run(top_n=10, input_csv=inp, db_path=tmp_path / 'd2.sqlite3', output_dir=out_dir, enable_crossref=True)
     df = pd.read_csv(out_dir / '05_all_hits_audit.csv')
     assert 'semantic_scholar:source down' in df.iloc[0]['failed_sources']
     assert 'crossref:source down' in df.iloc[0]['failed_sources']
     assert df.iloc[0]['Automated Status'] != 'incomplete_search_retry_needed'
+
+
+def test_crossref_disabled_by_default(tmp_path, monkeypatch):
+    calls = {"crossref": 0}
+
+    class C(_BaseClient):
+        def search(self, query, **kwargs):
+            calls["crossref"] += 1
+            return super().search(query, **kwargs)
+
+    monkeypatch.setattr('literature_review.pipeline.GoogleScholarClient', lambda: _BaseClient())
+    monkeypatch.setattr('literature_review.pipeline.OpenAlexClient', lambda: _BaseClient())
+    monkeypatch.setattr('literature_review.pipeline.SemanticScholarClient', lambda: _BaseClient())
+    monkeypatch.setattr('literature_review.pipeline.CrossrefClient', lambda: C())
+    inp = tmp_path / 'input.csv'
+    pd.DataFrame([{"Material": "BaTbPa"}]).to_csv(inp, index=False)
+    run(top_n=1, input_csv=inp, db_path=tmp_path / 'd3.sqlite3', output_dir=tmp_path / 'out')
+    assert calls["crossref"] == 0
 
 
 def test_completed_queries_skipped(tmp_path, monkeypatch):
