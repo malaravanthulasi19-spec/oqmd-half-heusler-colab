@@ -26,6 +26,15 @@ CREATE TABLE IF NOT EXISTS download_state (
 );
 """
 
+CREATE_ELEMENT_PROGRESS_SQL = """
+CREATE TABLE IF NOT EXISTS element_progress (
+    element TEXT PRIMARY KEY,
+    last_offset INTEGER NOT NULL DEFAULT 0,
+    completed INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
 
 class OQMDDatabase:
     def __init__(self, db_path: Path) -> None:
@@ -41,6 +50,7 @@ class OQMDDatabase:
         with self.connect() as conn:
             conn.execute(CREATE_ROWS_SQL)
             conn.execute(CREATE_STATE_SQL)
+            conn.execute(CREATE_ELEMENT_PROGRESS_SQL)
             conn.execute('INSERT OR IGNORE INTO download_state(id, last_offset) VALUES (1, 0);')
             conn.commit()
 
@@ -89,3 +99,28 @@ class OQMDDatabase:
         with self.connect() as conn:
             (count,) = conn.execute('SELECT COUNT(*) FROM oqmd_rows;').fetchone()
             return int(count)
+
+    def get_element_progress(self, element: str) -> tuple[int, bool]:
+        with self.connect() as conn:
+            row = conn.execute(
+                'SELECT last_offset, completed FROM element_progress WHERE element = ?;',
+                (element,),
+            ).fetchone()
+            if not row:
+                return 0, False
+            return int(row[0]), bool(row[1])
+
+    def update_element_progress(self, element: str, last_offset: int, completed: bool) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO element_progress(element, last_offset, completed, updated_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(element) DO UPDATE SET
+                    last_offset = excluded.last_offset,
+                    completed = excluded.completed,
+                    updated_at = CURRENT_TIMESTAMP;
+                """,
+                (element, last_offset, int(completed)),
+            )
+            conn.commit()
