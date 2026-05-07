@@ -64,7 +64,6 @@ def test_failed_sources_exported_and_optional_sources_not_blocking(tmp_path, mon
     run(top_n=10, input_csv=inp, db_path=tmp_path / 'd2.sqlite3', output_dir=out_dir)
     df = pd.read_csv(out_dir / '05_all_hits_audit.csv')
     assert 'semantic_scholar:source down' in df.iloc[0]['failed_sources']
-    assert 'crossref:source down' in df.iloc[0]['failed_sources']
     assert df.iloc[0]['Automated Status'] != 'incomplete_search_retry_needed'
 
 

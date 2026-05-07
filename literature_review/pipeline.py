@@ -16,9 +16,28 @@ from .crossref_client import CrossrefClient
 from .evidence_scoring import contains_any, score_reported_evidence, score_unreported_confidence
 from .constants import DFT_KEYWORDS, PROTOTYPE_KEYWORDS, ELEC_KEYWORDS, FORM_ENERGY_KEYWORDS
 from .classification import classify
-from .coverage import coverage_complete
 from .checkpoint import is_query_completed, mark_query_completed
 from .export import export_outputs
+
+
+FALSE_POSITIVE_TERMS = [
+    "candu",
+    "nandu river",
+    "gdpr",
+    "data protection",
+    "lyapunov",
+    "microplastic",
+    "river",
+    "thermalhydraulic code",
+]
+
+DFT_STRONG_TERMS = ["dft", "first principles", "first-principles", "density functional theory", "electronic structure"]
+CROSSREF_ENABLED = False
+
+
+def _is_false_positive_text(text: str) -> bool:
+    t = text.lower()
+    return any(term in t for term in FALSE_POSITIVE_TERMS)
 
 
 def load_input(path: Path = INPUT_CSV):
@@ -81,7 +100,7 @@ def run(top_n: int = 10, input_csv: Path = INPUT_CSV, db_path: Path = BACKUP_SQL
         print(f"Processing {idx + 1}/{len(df)}: {material}")
         variants = build_variants(material)
         cov = Coverage()
-        failed_sources: list[str] = []
+        failed_sources: set[str] = set()
         all_hits = []
         completed_query_count = 0
 
@@ -96,27 +115,28 @@ def run(top_n: int = 10, input_csv: Path = INPUT_CSV, db_path: Path = BACKUP_SQL
                 h, _, err = _run_query(conn, material, gate, "google_scholar", q, gsch.search)
                 all_hits.extend(h)
                 if err:
-                    failed_sources.append(f"google_scholar:{err}")
+                    failed_sources.add(f"google_scholar:{err}")
                 else:
                     completed_query_count += 1
                 h, _, err = _run_query(conn, material, gate, "openalex", q, oalex.search)
                 all_hits.extend(h)
                 if err:
-                    failed_sources.append(f"openalex:{err}")
+                    failed_sources.add(f"openalex:{err}")
                 else:
                     completed_query_count += 1
                 h, _, err = _run_query(conn, material, gate, "semantic_scholar", q, sem.search)
                 all_hits.extend(h)
                 if err:
-                    failed_sources.append(f"semantic_scholar:{err}")
+                    failed_sources.add(f"semantic_scholar:{err}")
                 else:
                     completed_query_count += 1
-                h, _, err = _run_query(conn, material, gate, "crossref", q, cref.search)
-                all_hits.extend(h)
-                if err:
-                    failed_sources.append(f"crossref:{err}")
-                else:
-                    completed_query_count += 1
+                if CROSSREF_ENABLED and gate == "gate1":
+                    h, _, err = _run_query(conn, material, gate, "crossref", q, cref.search)
+                    all_hits.extend(h)
+                    if err:
+                        failed_sources.add(f"crossref:{err}")
+                    else:
+                        completed_query_count += 1
 
         cov.google_scholar_checked = True
         cov.openalex_checked = True
@@ -130,23 +150,49 @@ def run(top_n: int = 10, input_csv: Path = INPUT_CSV, db_path: Path = BACKUP_SQL
                 h, _, err = _run_query(conn, material, "gate4", "google_scholar", q, gsch.search)
                 all_hits.extend(h)
                 if err:
-                    failed_sources.append(f"google_scholar:{err}")
+                    failed_sources.add(f"google_scholar:{err}")
                 else:
                     completed_query_count += 1
             cov.permutation_checked = True
 
         feat = {"multi_source": len({h.source for h in all_hits}) > 1}
+        false_positive_count = 0
+        valid_hits = []
+        formula_level_hits = []
+        exact_formula_hit_count = 0
+        dft_formula_hit_count = 0
         for h in all_hits:
             txt = f"{h.title} {h.snippet} {h.abstract}"
+            exact = exact_formula_match(txt, variants)
+            perm = permutation_formula_match(txt, variants)
+            dft = contains_any(txt, DFT_STRONG_TERMS)
+            false_positive = _is_false_positive_text(txt) and not (exact or perm)
+            if false_positive:
+                false_positive_count += 1
+            if exact:
+                exact_formula_hit_count += 1
+            if (exact or perm) and dft and (not false_positive):
+                dft_formula_hit_count += 1
+
             feat["exact_title"] = feat.get("exact_title", False) or exact_formula_match(h.title, variants)
             feat["exact_snippet"] = feat.get("exact_snippet", False) or exact_formula_match(h.snippet, variants)
-            feat["perm_match"] = feat.get("perm_match", False) or permutation_formula_match(txt, variants)
-            feat["only_elements"] = feat.get("only_elements", False) or (loose_element_system_match(txt, variants) and not exact_formula_match(txt, variants))
-            feat["dft"] = feat.get("dft", False) or contains_any(txt, DFT_KEYWORDS)
+            feat["perm_match"] = feat.get("perm_match", False) or perm
+            feat["only_elements"] = feat.get("only_elements", False) or (loose_element_system_match(txt, variants) and not (exact or perm))
+            feat["dft"] = feat.get("dft", False) or dft
             feat["prototype"] = feat.get("prototype", False) or contains_any(txt, PROTOTYPE_KEYWORDS)
             feat["elec"] = feat.get("elec", False) or contains_any(txt, ELEC_KEYWORDS)
             feat["formation"] = feat.get("formation", False) or contains_any(txt, FORM_ENERGY_KEYWORDS)
             feat["doi"] = feat.get("doi", False) or bool(h.doi)
+
+            if (exact or perm) and not false_positive:
+                match_type = "formula_permutation" if perm and not exact else ("exact_formula" if variants.compact in txt else ("hyphenated_formula" if variants.hyphenated in txt else "spaced_formula"))
+                valid_hits.append((3 if dft else 2, match_type, h))
+                formula_level_hits.append((3 if dft else 2, match_type, h))
+            elif feat["only_elements"] and not false_positive:
+                valid_hits.append((1, "element_system_weak", h))
+
+        valid_hits.sort(key=lambda x: x[0], reverse=True)
+        formula_level_hits.sort(key=lambda x: x[0], reverse=True)
 
         reported = score_reported_evidence(feat)
         unreported = score_unreported_confidence({
@@ -162,7 +208,15 @@ def run(top_n: int = 10, input_csv: Path = INPUT_CSV, db_path: Path = BACKUP_SQL
         })
 
         complete = cov.google_scholar_checked and cov.openalex_checked
-        label, reason = classify({"reported_evidence_score": reported, "unreported_confidence_score": unreported}, complete, False)
+        has_exact_or_perm = bool(formula_level_hits) or feat.get("exact_title") or feat.get("exact_snippet") or feat.get("perm_match")
+        if dft_formula_hit_count > 0 and has_exact_or_perm and false_positive_count == 0:
+            label, reason = "reported_dft", "exact/permutation formula + DFT context"
+        elif has_exact_or_perm and false_positive_count == 0:
+            label, reason = "reported_non_dft", "formula-level evidence without DFT"
+        else:
+            label, reason = classify({"reported_evidence_score": reported, "unreported_confidence_score": unreported}, complete, False)
+        if complete and exact_formula_hit_count == 0 and dft_formula_hit_count == 0 and not formula_level_hits:
+            label, reason = "not_found_after_protocol", "no exact formula-level literature evidence found; only weak element-system hits"
         if (not complete) or (not any(h.source == "google_scholar" for h in all_hits) and not any(h.source == "openalex" for h in all_hits) and failed_sources):
             label, reason = "incomplete_search_retry_needed", "required sources/gates incomplete"
 
@@ -198,12 +252,19 @@ def run(top_n: int = 10, input_csv: Path = INPUT_CSV, db_path: Path = BACKUP_SQL
             "citation_neighbor_checked": cov.citation_neighbor_checked,
             "full_text_checked": cov.full_text_checked,
             "source_error": cov.source_error,
-            "failed_sources": " | ".join(failed_sources),
+            "failed_sources": " | ".join(sorted(failed_sources)),
             "completed_query_count": completed_query_count,
             "hit_count": len(all_hits),
-            "best_paper_title": all_hits[0].title if all_hits else "",
-            "best_doi": all_hits[0].doi if all_hits else "",
-            "best_url": all_hits[0].url if all_hits else "",
+            "best_paper_title": formula_level_hits[0][2].title if formula_level_hits else "",
+            "best_doi": formula_level_hits[0][2].doi if formula_level_hits else "",
+            "best_url": formula_level_hits[0][2].url if formula_level_hits else "",
+            "best_evidence_match_type": valid_hits[0][1] if valid_hits else "",
+            "best_evidence_source": valid_hits[0][2].source if valid_hits else "",
+            "false_positive_count": false_positive_count,
+            "valid_evidence_hit_count": len(valid_hits),
+            "exact_formula_hit_count": exact_formula_hit_count,
+            "dft_formula_hit_count": dft_formula_hit_count,
+            "formula_level_evidence_found": bool(formula_level_hits),
             "final_manual_label": "",
             "reviewer_notes": "",
         })
