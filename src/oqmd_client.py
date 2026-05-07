@@ -11,6 +11,10 @@ import requests
 from src.config import OQMD_FORMATION_ENERGY_URL
 
 
+class Repeated502Error(RuntimeError):
+    """Raised when all retries fail with HTTP 502 responses."""
+
+
 @dataclass
 class OQMDClient:
     timeout_seconds: int
@@ -33,6 +37,7 @@ class OQMDClient:
         retries_per_page_size: int,
     ) -> tuple[dict[str, Any], int]:
         last_error: Exception | None = None
+        only_502_failures = True
         for page_size in page_sizes:
             for attempt in range(1, retries_per_page_size + 1):
                 try:
@@ -41,9 +46,14 @@ class OQMDClient:
                     return data, page_size
                 except requests.RequestException as exc:
                     last_error = exc
+                    status_code = getattr(getattr(exc, 'response', None), 'status_code', None)
+                    if status_code != 502:
+                        only_502_failures = False
                     print(
                         f"[OQMD] retryable error offset={offset}, limit={page_size}, "
                         f"attempt={attempt}: {exc}"
                     )
                     time.sleep(min(2 * attempt, 5))
+        if only_502_failures and last_error is not None:
+            raise Repeated502Error(f"Repeated HTTP 502 failures at offset={offset}") from last_error
         raise RuntimeError(f"Failed all page sizes at offset={offset}") from last_error

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from src.config import BASE_FILTER, DEFAULT_PAGE_SIZES, DEFAULT_RETRIES_PER_PAGE_SIZE
 from src.database import OQMDDatabase
-from src.oqmd_client import OQMDClient
+from src.oqmd_client import OQMDClient, Repeated502Error
 
 
 @dataclass
@@ -49,12 +49,22 @@ class OQMDDownloader:
         offset = start_offset
 
         while True:
-            data, used_limit = self.client.fetch_with_adaptive_page_sizes(
-                filter_expr=filter_expr,
-                offset=offset,
-                page_sizes=DEFAULT_PAGE_SIZES,
-                retries_per_page_size=DEFAULT_RETRIES_PER_PAGE_SIZE,
-            )
+            try:
+                data, used_limit = self.client.fetch_with_adaptive_page_sizes(
+                    filter_expr=filter_expr,
+                    offset=offset,
+                    page_sizes=DEFAULT_PAGE_SIZES,
+                    retries_per_page_size=DEFAULT_RETRIES_PER_PAGE_SIZE,
+                )
+            except Repeated502Error as exc:
+                self.db.update_state(
+                    last_offset=offset,
+                    current_filter=filter_expr,
+                    last_limit=DEFAULT_PAGE_SIZES[0],
+                )
+                print(f'[Downloader] {exc}')
+                print('[Downloader] Stopped safely after repeated 502s; safe to rerun later.')
+                break
             rows = data.get('data', [])
             if not rows:
                 print(f'[Downloader] No more rows at offset={offset}. Complete.')
