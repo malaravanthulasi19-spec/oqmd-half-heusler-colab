@@ -12,6 +12,7 @@ def export_outputs(df_all: pd.DataFrame, output_dir: Path):
         output_dir / "03_ambiguous_manual_review.csv", index=False
     )
     df_all[df_all["Automated Status"] == "reported_dft"].to_csv(output_dir / "04_reported_dft.csv", index=False)
+    df_all[df_all["Automated Status"] == "reported_dft"].to_csv(output_dir / "05_reported_dft.csv", index=False)
     df_all.to_csv(output_dir / "06_search_coverage_report.csv", index=False)
     novelty = df_all["novelty_confidence_tier"] if "novelty_confidence_tier" in df_all.columns else pd.Series(["" for _ in range(len(df_all))])
     df_all[novelty == "HIGH_CONFIDENCE_UNREPORTED"].to_csv(output_dir / "02_high_confidence_unreported.csv", index=False)

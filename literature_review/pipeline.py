@@ -18,6 +18,7 @@ from .constants import DFT_KEYWORDS, PROTOTYPE_KEYWORDS, ELEC_KEYWORDS, FORM_ENE
 from .classification import classify
 from .checkpoint import is_query_completed, mark_query_completed
 from .export import export_outputs
+from .evidence_depth_scoring import compute_reported_depth_score
 
 
 FALSE_POSITIVE_TERMS = [
@@ -198,6 +199,37 @@ def run(
 
         valid_hits.sort(key=lambda x: x[0], reverse=True)
 
+        best_depth = {
+            "reported_depth_score": 0,
+            "reported_depth_tier": "NO_VALID_EVIDENCE",
+            "property_groups_detected": "",
+            "formula_evidence_score": 0,
+            "half_heusler_context_score": 0,
+            "dft_method_score": 0,
+            "property_depth_score": 0,
+            "false_positive_penalty": 0,
+            "manual_warning": "",
+        }
+        for _, tier_name, hit in valid_hits:
+            txt = f"{hit.title} {hit.snippet} {hit.abstract}"
+            exact = exact_formula_match(txt, variants)
+            perm = permutation_formula_match(txt, variants)
+            depth = compute_reported_depth_score({
+                "title": hit.title,
+                "snippet": hit.snippet,
+                "abstract": hit.abstract,
+                "exact_formula_match": exact,
+                "spaced_formula_match": exact_formula_match(txt, variants),
+                "hyphenated_formula_match": exact_formula_match(txt.replace(" ", "-"), variants),
+                "alloy_doped_formula_match": any(x in txt.lower() for x in ["doped", "alloy"]),
+                "formula_permutation_match": perm,
+                "false_positive_flag": _is_false_positive_text(txt) and not (exact or perm),
+                "evidence_tier": "TIER_1_ELEMENT_SYSTEM_WEAK" if tier_name == "element_system_weak" else "TIER_3_FORMULA_LEVEL",
+                "formula_level_evidence_found": bool(exact or perm),
+            })
+            if depth["reported_depth_score"] > best_depth["reported_depth_score"]:
+                best_depth = depth
+
         reported = score_reported_evidence(feat)
         unreported = score_unreported_confidence({
             "exact_dft": feat.get("exact_title") and feat.get("dft"),
@@ -236,6 +268,14 @@ def run(
             label, reason = "incomplete_search_retry_needed", "PIPELINE_NOT_CALIBRATED: Do not use not_found_after_protocol as novelty evidence until validation passes."
         else:
             label, reason = classify({"reported_evidence_score": reported, "unreported_confidence_score": unreported}, complete, False)
+        if best_depth["reported_depth_score"] >= 75:
+            if formula_level_evidence_found and dft_formula_hit_count > 0:
+                label, reason = "reported_dft", "deep DFT/property depth evidence"
+            else:
+                label, reason = "ambiguous_manual_review", "deep literature evidence requires manual review"
+        elif best_depth["reported_depth_score"] >= 50 and label == "not_found_after_protocol":
+            label, reason = "ambiguous_manual_review", "DFT-level depth evidence requires manual verification"
+            unreported = max(0, unreported - 35)
         if (not complete) or (not any(h.source == "google_scholar" for h in all_hits) and not any(h.source == "openalex" for h in all_hits) and failed_sources):
             label, reason = "incomplete_search_retry_needed", "required sources/gates incomplete"
 
@@ -295,6 +335,15 @@ def run(
             "second_pass_dft_hits": second_pass_dft_hits,
             "final_manual_label": "",
             "reviewer_notes": "",
+            "reported_depth_score": best_depth["reported_depth_score"],
+            "reported_depth_tier": best_depth["reported_depth_tier"],
+            "property_groups_detected": best_depth["property_groups_detected"],
+            "formula_evidence_score": best_depth["formula_evidence_score"],
+            "half_heusler_context_score": best_depth["half_heusler_context_score"],
+            "dft_method_score": best_depth["dft_method_score"],
+            "property_depth_score": best_depth["property_depth_score"],
+            "false_positive_penalty": best_depth["false_positive_penalty"],
+            "manual_warning": best_depth["manual_warning"],
         })
 
     out_df = pd.DataFrame(rows)
