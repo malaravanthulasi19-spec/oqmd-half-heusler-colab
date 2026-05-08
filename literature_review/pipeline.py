@@ -21,6 +21,9 @@ from .export import export_outputs, export_material_screening_master
 from .material_selection_scoring import compute_material_selection_scores
 from .evidence_depth_scoring import compute_reported_depth_score
 from .keypaper_filters import detect_keypaper_context, compute_keypaper_depth_score
+from .composition_equivalence import formula_permutations
+from .fast_literature_screening import compute_local_material_gate
+from .strategic_classifier import load_prior_material_evidence
 
 
 FALSE_POSITIVE_TERMS = [
@@ -97,7 +100,10 @@ def run(
     search_profile: str = "candidate_screening",
     recall_second_pass: bool = False,
     calibration_passed: bool = True,
+    search_mode: str = "fast",
 ):
+    if search_mode not in {"fast", "adaptive", "deep"}:
+        raise ValueError("search_mode must be one of: fast, adaptive, deep")
     if search_profile == "candidate_screening_expanded" and top_n > 10:
         print("Expanded search profile is expensive. Recommended top_n=10 first.")
     conn = connect(db_path)
@@ -112,6 +118,11 @@ def run(
     for idx, r in df.iterrows():
         material = _extract_material(r)
         print(f"Processing {idx + 1}/{len(df)}: {material}")
+        prior = load_prior_material_evidence(None, material)
+        r = r.copy()
+        for k, v in prior.items():
+            r[k] = v
+        gate_meta = compute_local_material_gate(r.to_dict())
         variants = build_variants(material)
         cov = Coverage()
         failed_sources: set[str] = set()
@@ -122,7 +133,23 @@ def run(
         input_half_heusler_verified = any(k in prototype.lower() for k in ["c1b", "halfheusler", "half-heusler", "mgagas"]) or space_group == "F-43m"
 
         prof = profile_queries(variants, search_profile)
-        gates = [("gate1", prof["gate1"]), ("gate2", prof["gate2"]), ("gate3", prof["gate3"]) ]
+        if search_mode in {"fast", "adaptive"}:
+            perms = formula_permutations(material)[:6]
+            base_formula = perms[0] if perms else variants.compact
+            gate1 = [f"\"{p}\"" for p in perms]
+            gate1 += [f"\"{base_formula}\" half-Heusler DFT", f"\"{base_formula}\" thermoelectric"]
+            gate2 = []
+            if search_mode == "adaptive" and gate_meta.get("should_search_literature", False):
+                gate2 = [
+                    f"{base_formula} (\"DFT\" OR \"density functional theory\" OR \"first principles\")",
+                    f"{base_formula} (\"half-Heusler\" OR \"C1b\" OR \"MgAgAs\" OR \"F-43m\")",
+                    f"{base_formula} (\"band structure\" OR \"DOS\" OR \"density of states\")",
+                    f"{base_formula} (\"phonon dispersion\" OR \"mechanical stability\")",
+                    f"{base_formula} (\"thermoelectric\" OR \"Seebeck\" OR \"ZT\" OR \"BoltzTrap\")",
+                ]
+            gates = [("gate1", gate1), ("gate2", gate2), ("gate3", [])]
+        else:
+            gates = [("gate1", prof["gate1"]), ("gate2", prof["gate2"]), ("gate3", prof["gate3"]) ]
         for gate, queries in gates:
             for q in queries:
                 print(f"  {gate} query: {q}")
@@ -159,7 +186,7 @@ def run(
         cov.source_error = bool(failed_sources)
 
         has_strong = any(exact_formula_match((h.title + " " + h.snippet + " " + h.abstract), variants) and contains_any((h.title + " " + h.snippet + " " + h.abstract), DFT_KEYWORDS) for h in all_hits)
-        if not has_strong:
+        if not has_strong and search_mode == "deep":
             for q in gate4_queries(variants):
                 h, _, err = _run_query(conn, material, "gate4", "google_scholar", q, gsch.search)
                 all_hits.extend(h)
@@ -377,6 +404,14 @@ def run(
             "manual_warning": best_depth["manual_warning"],
             **best_keypaper,
             **best_keypaper_ctx,
+            "search_mode_used": search_mode,
+            "local_gate_status": gate_meta.get("local_gate_status", ""),
+            "local_gate_reason": gate_meta.get("local_gate_reason", ""),
+            "query_budget_used": completed_query_count,
+            "query_budget_skipped": 0,
+            "search_stopped_early": False,
+            "early_stop_reason": "",
+            "deep_search_used": search_mode == "deep",
             **score_cols,
         })
 
