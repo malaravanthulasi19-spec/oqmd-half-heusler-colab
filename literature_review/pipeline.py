@@ -34,6 +34,7 @@ FALSE_POSITIVE_TERMS = [
 ]
 
 DFT_STRONG_TERMS = ["dft", "first principles", "first-principles", "density functional theory", "electronic structure"]
+HALF_HEUSLER_TERMS = ["half-heusler", "half heusler", "c1b", "mgagas", "f-43m", "space group 216"]
 
 
 def _is_false_positive_text(text: str) -> bool:
@@ -96,6 +97,8 @@ def run(
     recall_second_pass: bool = False,
     calibration_passed: bool = True,
 ):
+    if search_profile == "candidate_screening_expanded" and top_n > 25:
+        print("Expanded search profile is expensive. Recommended top_n <= 25 unless explicitly confirmed.")
     conn = connect(db_path)
     df = load_input(input_csv).head(top_n)
 
@@ -113,6 +116,9 @@ def run(
         failed_sources: set[str] = set()
         all_hits = []
         completed_query_count = 0
+        prototype = str(r.get("Prototype", "") or "")
+        space_group = str(r.get("Space Group", "") or "")
+        input_half_heusler_verified = any(k in prototype.lower() for k in ["c1b", "halfheusler", "half-heusler", "mgagas"]) or space_group == "F-43m"
 
         prof = profile_queries(variants, search_profile)
         gates = [("gate1", prof["gate1"]), ("gate2", prof["gate2"]), ("gate3", prof["gate3"]) ]
@@ -170,11 +176,13 @@ def run(
         valid_hits = []
         exact_formula_hit_count = 0
         dft_formula_hit_count = 0
+        literature_half_heusler_context_found = False
         for h in all_hits:
             txt = f"{h.title} {h.snippet} {h.abstract}"
             exact = exact_formula_match(txt, variants)
             perm = permutation_formula_match(txt, variants)
             dft = contains_any(txt, DFT_STRONG_TERMS)
+            hh_ctx = contains_any(txt, HALF_HEUSLER_TERMS)
             false_positive = _is_false_positive_text(txt) and not (exact or perm)
             if false_positive:
                 false_positive_count += 1
@@ -182,6 +190,8 @@ def run(
                 exact_formula_hit_count += 1
             if (exact or perm) and dft and (not false_positive):
                 dft_formula_hit_count += 1
+            if (exact or perm) and hh_ctx and (not false_positive):
+                literature_half_heusler_context_found = True
 
             feat["exact_title"] = feat.get("exact_title", False) or exact_formula_match(h.title, variants)
             feat["exact_snippet"] = feat.get("exact_snippet", False) or exact_formula_match(h.snippet, variants)
@@ -260,7 +270,10 @@ def run(
             dft_formula_hit_count += second_pass_dft_hits
 
         if dft_formula_hit_count > 0 and formula_level_evidence_found:
-            label, reason = "reported_dft", "exact/permutation formula + DFT context"
+            if input_half_heusler_verified or literature_half_heusler_context_found or contains_any(f"{prototype} {space_group}", HALF_HEUSLER_TERMS):
+                label, reason = "reported_dft", "exact/permutation formula + DFT context"
+            else:
+                label, reason = "ambiguous_manual_review", "formula + DFT found, but half-Heusler context not confirmed"
         elif formula_level_evidence_found:
             label, reason = "reported_non_dft", "formula-level evidence without DFT"
         elif complete and exact_formula_hit_count == 0 and dft_formula_hit_count == 0 and not formula_level_evidence_found and calibration_passed:
@@ -328,10 +341,14 @@ def run(
             "dft_formula_hit_count": dft_formula_hit_count,
             "formula_level_evidence_found": formula_level_evidence_found,
             "novelty_confidence_tier": "REPORTED_DFT" if label=="reported_dft" else ("REPORTED_NON_DFT" if label=="reported_non_dft" else ("INCOMPLETE_SEARCH" if label=="incomplete_search_retry_needed" else ("AMBIGUOUS_REVIEW_REQUIRED" if label=="ambiguous_manual_review" else ("HIGH_CONFIDENCE_UNREPORTED" if calibration_passed else "LOW_CONFIDENCE_UNREPORTED")))),
-            "contains_radioactive_element": any(e in material for e in ["Ac","Pa","Np","Pu","Pm","U","Th","Tc"]),
-            "radioactive_elements": ",".join([e for e in ["Ac","Pa","Np","Pu","Pm","U","Th","Tc"] if e in material]),
-            "contains_highly_toxic_element": any(e in material for e in ["U","Pa","Pu","Np"]),
-            "practicality_tier": "RADIOACTIVE_REVIEW" if any(e in material for e in ["Ac","Pa","Np","Pu","Pm","U","Th","Tc"]) else "PRACTICAL_PRIORITY",
+            "input_half_heusler_verified": input_half_heusler_verified,
+            "literature_half_heusler_context_found": literature_half_heusler_context_found,
+            "half_heusler_filter_status": (
+                "MISSING_PROTOTYPE_METADATA" if not prototype.strip() and not space_group.strip()
+                else "INPUT_CONFIRMED_C1B" if input_half_heusler_verified
+                else "LITERATURE_CONFIRMED_HALF_HEUSLER" if literature_half_heusler_context_found
+                else "NOT_HALF_HEUSLER_REVIEW"
+            ),
             "second_pass_used": second_pass_used,
             "second_pass_formula_hits": second_pass_formula_hits,
             "second_pass_dft_hits": second_pass_dft_hits,

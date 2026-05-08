@@ -27,6 +27,11 @@ def test_defer_cases_and_tiers():
     assert compute_material_selection_scores(_base(Prototype="Perovskite", **{"Space Group": "P-1"}))["final_material_priority_tier"] != "TOP_RESEARCH_PRIORITY"
     assert compute_material_selection_scores(_base(Material="TiCdSb"))["practicality_tier"] == "TOXICITY_REVIEW"
     assert compute_material_selection_scores(_base(Material="TiPtSb"))["practicality_tier"] == "EXPENSIVE_RARE_REVIEW"
+    assert compute_material_selection_scores(_base(Material="TiAcSb"))["practicality_tier"] == "HIGHLY_IMPRACTICAL"
+    assert compute_material_selection_scores(_base(Material="TiUSb"))["practicality_tier"] == "RADIOACTIVE_REVIEW"
+    assert compute_material_selection_scores(_base(Material="TiPbSb"))["practicality_tier"] == "TOXICITY_REVIEW"
+    assert compute_material_selection_scores(_base(Material="TiRuSb"))["practicality_tier"] == "EXPENSIVE_RARE_REVIEW"
+    assert compute_material_selection_scores(_base(Material="TiUSb"))["final_material_priority_tier"] != "TOP_RESEARCH_PRIORITY"
 
 
 def test_score_clamped_and_export_columns(tmp_path):
