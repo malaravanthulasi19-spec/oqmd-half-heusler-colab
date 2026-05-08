@@ -30,33 +30,51 @@ class OQMDDownloader:
         self.db = db
         self.client = client
 
-    def run(self, base_filter: str = BASE_FILTER, backup_path: Path | None = None) -> DownloadResult:
+    def run(
+        self,
+        base_filter: str = BASE_FILTER,
+        backup_path: Path | None = None,
+        search_mode: str = 'adaptive',
+    ) -> DownloadResult:
         self.db.init_schema()
-        self._initialize_fallback_jobs(base_filter)
+        mode = search_mode.strip().lower()
+        if mode not in {'adaptive', 'global', 'fallback'}:
+            raise ValueError("search_mode must be one of: 'adaptive', 'global', 'fallback'")
+
+        if mode in {'adaptive', 'fallback'}:
+            self._initialize_fallback_jobs(base_filter)
         total_inserted = 0
         safe_stop = False
         pages_since_backup = 0
 
-        print('[Downloader] Trying global BASE_FILTER first.')
-        base_inserted, base_safe_stop = self._process_one_stream('global', base_filter, None)
-        total_inserted += base_inserted
-        safe_stop = safe_stop or base_safe_stop
+        run_fallback = mode == 'fallback'
+        if mode in {'adaptive', 'global'}:
+            print('[Downloader] Trying global BASE_FILTER first.')
+            base_inserted, base_safe_stop = self._process_one_stream('global', base_filter, None)
+            total_inserted += base_inserted
+            safe_stop = safe_stop or base_safe_stop
+            if mode == 'adaptive':
+                run_fallback = base_safe_stop or base_inserted == 0
+                if run_fallback:
+                    reason = 'safe stop' if base_safe_stop else 'no rows returned'
+                    print(f'[Downloader] Switching to fallback search after global stream ({reason}).')
 
         if backup_path and total_inserted > 0:
             self.db.safe_backup_to(backup_path)
 
-        pending = self.db.list_pending_jobs(mode='fallback')
-        for job in pending:
-            print(f"[Downloader] Processing fallback job element={job['element']} offset={job['next_offset']}")
-            inserted, stopped = self._process_one_stream(job['job_id'], job['filter_expr'], job)
-            total_inserted += inserted
-            safe_stop = safe_stop or stopped
-            pages_since_backup += 1
-            if backup_path and pages_since_backup >= BACKUP_EVERY_PAGES:
-                self.db.safe_backup_to(backup_path)
-                pages_since_backup = 0
-            if stopped:
-                break
+        if run_fallback:
+            pending = self.db.list_pending_jobs(mode='fallback')
+            for job in pending:
+                print(f"[Downloader] Processing fallback job element={job['element']} offset={job['next_offset']}")
+                inserted, stopped = self._process_one_stream(job['job_id'], job['filter_expr'], job)
+                total_inserted += inserted
+                safe_stop = safe_stop or stopped
+                pages_since_backup += 1
+                if backup_path and pages_since_backup >= BACKUP_EVERY_PAGES:
+                    self.db.safe_backup_to(backup_path)
+                    pages_since_backup = 0
+                if stopped:
+                    break
 
         if backup_path:
             self.db.safe_backup_to(backup_path)
