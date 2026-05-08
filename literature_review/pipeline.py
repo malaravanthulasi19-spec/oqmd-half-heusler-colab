@@ -20,6 +20,7 @@ from .checkpoint import is_query_completed, mark_query_completed
 from .export import export_outputs
 from .material_selection_scoring import compute_material_selection_scores
 from .evidence_depth_scoring import compute_reported_depth_score
+from .keypaper_filters import detect_keypaper_context, compute_keypaper_depth_score
 
 
 FALSE_POSITIVE_TERMS = [
@@ -97,8 +98,8 @@ def run(
     recall_second_pass: bool = False,
     calibration_passed: bool = True,
 ):
-    if search_profile == "candidate_screening_expanded" and top_n > 25:
-        print("Expanded search profile is expensive. Recommended top_n <= 25 unless explicitly confirmed.")
+    if search_profile == "candidate_screening_expanded" and top_n > 10:
+        print("Expanded search profile is expensive. Recommended top_n=10 first.")
     conn = connect(db_path)
     df = load_input(input_csv).head(top_n)
 
@@ -121,7 +122,7 @@ def run(
         input_half_heusler_verified = any(k in prototype.lower() for k in ["c1b", "halfheusler", "half-heusler", "mgagas"]) or space_group == "F-43m"
 
         prof = profile_queries(variants, search_profile)
-        gates = [("gate1", prof["gate1"]), ("gate2", prof["gate2"]), ("gate3", prof["gate3"]) ]
+        gates = [(k, prof[k]) for k in ["gate1","gate2","gate3","gate4","gate5","gate6"] if k in prof]
         for gate, queries in gates:
             for q in queries:
                 print(f"  {gate} query: {q}")
@@ -221,6 +222,8 @@ def run(
             "false_positive_penalty": 0,
             "manual_warning": "",
         }
+        best_keypaper = {"keypaper_depth_score": 0, "keypaper_depth_tier": "SHALLOW_OR_NO_RELEVANT_EVIDENCE", "keypaper_context_groups_detected": 0, "keypaper_manual_warning": ""}
+        keypaper_context_max = {}
         for _, tier_name, hit in valid_hits:
             txt = f"{hit.title} {hit.snippet} {hit.abstract}"
             exact = exact_formula_match(txt, variants)
@@ -240,6 +243,11 @@ def run(
             })
             if depth["reported_depth_score"] > best_depth["reported_depth_score"]:
                 best_depth = depth
+            kp_ctx = detect_keypaper_context(txt)
+            kp = compute_keypaper_depth_score({**kp_ctx, "formula_level_evidence_found": bool(exact or perm), "false_positive_flag": _is_false_positive_text(txt) and not (exact or perm), "evidence_tier": "TIER_1_ELEMENT_SYSTEM_WEAK" if tier_name == "element_system_weak" else "TIER_3_FORMULA_LEVEL"})
+            if kp["keypaper_depth_score"] > best_keypaper["keypaper_depth_score"]:
+                best_keypaper = {**kp}
+                keypaper_context_max = kp_ctx
 
         reported = score_reported_evidence(feat)
         unreported = score_unreported_confidence({
@@ -282,7 +290,12 @@ def run(
             label, reason = "incomplete_search_retry_needed", "PIPELINE_NOT_CALIBRATED: Do not use not_found_after_protocol as novelty evidence until validation passes."
         else:
             label, reason = classify({"reported_evidence_score": reported, "unreported_confidence_score": unreported}, complete, False)
-        if best_depth["reported_depth_score"] >= 75:
+        if formula_level_evidence_found and best_keypaper["keypaper_depth_score"] >= 80:
+            if dft_formula_hit_count > 0 and (input_half_heusler_verified or literature_half_heusler_context_found):
+                label, reason = "reported_dft", "deep key-paper-style DFT/property study detected"
+            else:
+                label, reason = "ambiguous_manual_review", "deep key-paper-style literature evidence requires manual review"
+        elif best_depth["reported_depth_score"] >= 75:
             if formula_level_evidence_found and dft_formula_hit_count > 0:
                 label, reason = "reported_dft", "deep DFT/property depth evidence"
             else:
@@ -307,12 +320,15 @@ def run(
         print(f"  hit count: {len(all_hits)}")
         print(f"  final label: {label}")
         best_hit = valid_hits[0] if valid_hits and valid_hits[0][1] != "element_system_weak" else None
-        score_cols = compute_material_selection_scores({**r.to_dict(), **best_depth, "Automated Status": label, "formula_level_evidence_found": formula_level_evidence_found, "exact_formula_hit_count": exact_formula_hit_count, "dft_formula_hit_count": dft_formula_hit_count, "google_scholar_checked": cov.google_scholar_checked, "openalex_checked": cov.openalex_checked, "semantic_scholar_checked": cov.semantic_scholar_checked, "source_error": cov.source_error, "best_paper_title": best_hit[2].title if best_hit else "", "best_doi": best_hit[2].doi if best_hit else ""})
+        score_cols = compute_material_selection_scores({**r.to_dict(), **best_depth, **best_keypaper, **keypaper_context_max, "Automated Status": label, "formula_level_evidence_found": formula_level_evidence_found, "exact_formula_hit_count": exact_formula_hit_count, "dft_formula_hit_count": dft_formula_hit_count, "google_scholar_checked": cov.google_scholar_checked, "openalex_checked": cov.openalex_checked, "semantic_scholar_checked": cov.semantic_scholar_checked, "source_error": cov.source_error, "best_paper_title": best_hit[2].title if best_hit else "", "best_doi": best_hit[2].doi if best_hit else ""})
         rows.append({
             "Rank": r.get("Rank"),
             "Material": material,
+            "Composition": r.get("Composition", r.get("Material", material)),
             "Band Gap (eV)": r.get("Band Gap (eV)"),
+            "Formation Energy / ΔE": r.get("Formation Energy / ΔE"),
             "Stability": r.get("Stability"),
+            "Prototype": r.get("Prototype"),
             "OQMD Entry ID": r.get("OQMD Entry ID"),
             "Space Group": r.get("Space Group"),
             "Automated Status": label,
@@ -363,6 +379,8 @@ def run(
             "property_depth_score": best_depth["property_depth_score"],
             "false_positive_penalty": best_depth["false_positive_penalty"],
             "manual_warning": best_depth["manual_warning"],
+            **best_keypaper,
+            **keypaper_context_max,
             **score_cols,
         })
 

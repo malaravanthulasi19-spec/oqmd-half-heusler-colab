@@ -26,11 +26,15 @@ def export_outputs(df_all: pd.DataFrame, output_dir: Path):
     ranking = df_all.copy()
     tier_vals = ranking["final_material_priority_tier"] if "final_material_priority_tier" in ranking.columns else pd.Series(["DEFER"] * len(ranking))
     ranking["_tier"] = pd.Categorical(tier_vals, categories=order, ordered=True)
-    for col in ["final_selection_score", "practicality_score", "stability_score", "literature_risk_penalty"]:
+    for col in ["final_selection_score", "keypaper_depth_score", "practicality_score", "stability_score", "literature_risk_penalty"]:
         if col not in ranking.columns:
             ranking[col] = 0
-    ranking = ranking.sort_values(["_tier", "final_selection_score", "practicality_score", "stability_score", "literature_risk_penalty"], ascending=[True, False, False, False, True]).drop(columns=["_tier"])
-    ranking.head(10).to_csv(output_dir / "11_top10_final_research_candidates.csv", index=False)
+    ranking = ranking.sort_values(["_tier", "final_selection_score", "keypaper_depth_score", "practicality_score", "stability_score", "literature_risk_penalty"], ascending=[True, False, True, False, False, True]).drop(columns=["_tier"])
+    required_cols = ["Rank","Material","Composition","Band Gap (eV)","Formation Energy / ΔE","Stability","Prototype","Space Group","OQMD Entry ID","Automated Status","novelty_confidence_tier","formula_level_evidence_found","exact_formula_hit_count","dft_formula_hit_count","reported_depth_score","reported_depth_tier","keypaper_depth_score","keypaper_depth_tier","keypaper_context_groups_detected","keypaper_manual_warning","novelty_score","half_heusler_validity_score","stability_score","practicality_score","application_score","literature_risk_penalty","metadata_quality_score","final_selection_score","final_material_priority_tier","selection_reason","practicality_tier","radioactive_elements","highly_toxic_elements","expensive_rare_elements","input_half_heusler_verified","literature_half_heusler_context_found","half_heusler_filter_status","best_paper_title","best_doi","best_url","reviewer_notes"]
+    for c in required_cols:
+        if c not in ranking.columns:
+            ranking[c] = ""
+    ranking.head(10)[required_cols].to_csv(output_dir / "11_top10_final_research_candidates.csv", index=False)
 
     xlsx_path = output_dir / "01_priority_unreported_candidates.xlsx"
     try:

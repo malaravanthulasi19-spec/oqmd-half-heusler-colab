@@ -12,9 +12,6 @@ def test_staged_query_generation():
 def test_candidate_screening_expanded_queries():
     v = build_variants("TiNiSb")
     prof = profile_queries(v, "candidate_screening_expanded")
-    q2 = " | ".join(prof["gate2"])
-    q3 = " | ".join(prof["gate3"])
-    for term in ["DOS", "density of states", "band structure", "BoltzTrap"]:
-        assert term in q2
-    for term in ["mechanical stability", "phonon dispersion", "thermoelectric", "Seebeck", "ZT", "zT", "half-metal", "spin polarization", "ferromagnetic", "spintronic"]:
-        assert term in q3
+    joined = " | ".join(sum(prof.values(), []))
+    for term in ["Born-Huang criteria", "C11 C12 C44", "phonon dispersion", "DOS", "density of states", "spin polarization", "Seebeck coefficient", "ZT", "zT", "Slack model", "AIMD", "ALAMODE", "BoltzTrap2", "GIBBS2"]:
+        assert term in joined
