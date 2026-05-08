@@ -28,6 +28,7 @@ DECISION_PRIORITY = [
     "INCOMPLETE_SEARCH_RETRY",
     "LOWER_PRIORITY_REVIEW",
 ]
+FINAL_DECISION_SIMPLE_PRIORITY = ["BEST_NOVEL_CANDIDATE","GOOD_NOVEL_CANDIDATE","MANUAL_REVIEW_REQUIRED","BACKUP_ONLY","LOW_STABILITY_REJECT","TOXICITY_REJECT","REPORTED_REJECT"]
 
 def _to_float(value, default=0.0):
     try:
@@ -149,6 +150,7 @@ def export_material_screening_master(rows, hits, coverage, output_dir) -> Path:
         if col not in df.columns:
             df[col] = 0
     final_decision = df.sort_values(["_decision", "unreported_priority_score", "stability_priority_score", "bandgap_priority_score", "practicality_priority_score", "prior_literature_penalty", "final_priority_order_score"], ascending=[True, False, False, False, False, True, False]).drop(columns=["_decision"])
+    final_decision = _build_simple_ranked_list(final_decision)
     fd_cols = ["Rank","Material","Band Gap (eV)","Stability","Formation Energy / ΔE","Space Group","Prototype","Automated Status","material_decision_status","literature_status","evidence_reliability_tier","unreported_priority_score","stability_priority_score","bandgap_priority_score","practicality_priority_score","prior_literature_penalty","final_priority_order_score","priority_order_reason","prior_conflict_flag","prior_reported_status","prior_best_paper_title","prior_best_doi","prior_best_url","Unreported Confidence Score","novelty_confidence_tier","reported_depth_score","keypaper_depth_score","final_selection_score","final_material_priority_tier","practicality_tier","radioactive_elements","highly_toxic_elements","expensive_rare_elements","best_paper_title","paper_link_if_reported","material_decision_reason","final_recommendation","reviewer_notes"]
     top10_cols = ["Rank","Material","Composition","Band Gap (eV)","Formation Energy / ΔE","Stability","Prototype","Space Group","OQMD Entry ID","Automated Status","Reason","material_decision_status","material_decision_reason","final_recommendation","paper_link_if_reported","Unreported Confidence Score","Reported Evidence Score","novelty_confidence_tier","formula_level_evidence_found","exact_formula_hit_count","dft_formula_hit_count","reported_depth_score","reported_depth_tier","keypaper_depth_score","keypaper_depth_tier","keypaper_context_groups_detected","novelty_score","half_heusler_validity_score","stability_score","practicality_score","application_score","literature_risk_penalty","metadata_quality_score","final_selection_score","final_material_priority_tier","practicality_tier","input_half_heusler_verified","literature_half_heusler_context_found","half_heusler_filter_status","best_paper_title","best_doi","best_url","reviewer_notes"]
     for cols in [fd_cols, top10_cols]:
@@ -161,6 +163,8 @@ def export_material_screening_master(rows, hits, coverage, output_dir) -> Path:
         out_path.write_bytes(b"")
         return out_path
     with writer as xw:
+        simple_cols = ["Final Rank","Material","Unreported Score","Unreported Status","Stability","Stability Grade","Toxicity / Practicality","Band Gap (eV)","Band Gap Grade","Reported Paper Link","Final Decision","Final Reason"]
+        final_decision[simple_cols].to_excel(xw, sheet_name="Final_Ranked_List", index=False)
         final_decision[fd_cols].to_excel(xw, sheet_name="Final_Decision", index=False)
         final_decision[final_decision["material_decision_status"] == "RECOMMENDED_NOVEL_CANDIDATE"][fd_cols].to_excel(xw, "Recommended_Novel", index=False)
         final_decision[final_decision["material_decision_status"].isin(["STRONG_NOVEL_CANDIDATE_MANUAL_VERIFY","PRIOR_RUN_CONFLICT_MANUAL_REVIEW","AMBIGUOUS_PRIOR_WORK_REVIEW"])][fd_cols].to_excel(xw, "Strong_Manual_Verify", index=False)
@@ -169,22 +173,120 @@ def export_material_screening_master(rows, hits, coverage, output_dir) -> Path:
         final_decision[top10_cols].to_excel(xw, "All_Top10", index=False)
         (pd.DataFrame(hits) if hits else pd.DataFrame([{"note":"No hit audit rows available for this run."}])).to_excel(xw, "All_Hits_Audit", index=False)
         (pd.DataFrame(coverage) if coverage else pd.DataFrame([{"note":"No search coverage rows available for this run."}])).to_excel(xw, "Search_Coverage", index=False)
+        pd.DataFrame([{"note":"Search strategy details are retained in pipeline logs and audit sheets."}]).to_excel(xw, "Search_Strategy", index=False)
+        validation_df = _build_validation_checks(final_decision)
+        validation_df.to_excel(xw, "Validation_Checks", index=False)
         pd.DataFrame({"Legend":["Use Recommended_Novel first.","Automated Status = literature search status.","literature_status = strategic interpretation of literature evidence.","evidence_reliability_tier = confidence in the search outcome.","material_decision_status = final material-selection decision.","Ranking priority is: 1. unreported novelty, 2. stability, 3. band gap, 4. practicality, 5. prior literature penalty.","Do not use PRIOR_RUN_CONFLICT_MANUAL_REVIEW, REPORTED_DFT_DEFER, or DEEP_PRIOR_STUDY_DEFER as novelty candidates."]}).to_excel(xw, "Legend", index=False)
         wb = xw.book
         fill_map = {"RECOMMENDED_NOVEL_CANDIDATE":"C6EFCE","STRONG_NOVEL_CANDIDATE_MANUAL_VERIFY":"E2F0D9","NOVEL_BUT_MODERATE_STABILITY":"FFF2CC","EXPENSIVE_RARE_BACKUP":"FFF2CC","NOVEL_BUT_LOW_STABILITY":"FFF2CC","AMBIGUOUS_PRIOR_WORK_REVIEW":"FCE4D6"}
         red = "F8CBAD"
         for ws in wb.worksheets:
             _style_sheet(ws)
-            if ws.title in {"Final_Decision","Recommended_Novel","Strong_Manual_Verify","Backup_Candidates","Reported_or_Defer","All_Top10"}:
+            if ws.title in {"Final_Ranked_List","Final_Decision","Recommended_Novel","Strong_Manual_Verify","Backup_Candidates","Reported_or_Defer","All_Top10"}:
                 headers = [c.value for c in ws[1]]
-                if "material_decision_status" in headers:
-                    ci = headers.index("material_decision_status") + 1
+                key_col = "material_decision_status" if "material_decision_status" in headers else ("Final Decision" if "Final Decision" in headers else None)
+                if key_col:
+                    ci = headers.index(key_col) + 1
                     for r in range(2, ws.max_row + 1):
                         v = ws.cell(r, ci).value
                         color = fill_map.get(v, red if str(v).endswith("DEFER") or v in {"INCOMPLETE_SEARCH_RETRY"} else None)
+                        if key_col == "Final Decision":
+                            color = {
+                                "BEST_NOVEL_CANDIDATE": "C6EFCE",
+                                "GOOD_NOVEL_CANDIDATE": "E2F0D9",
+                                "MANUAL_REVIEW_REQUIRED": "FCE4D6",
+                                "BACKUP_ONLY": "FFF2CC",
+                                "LOW_STABILITY_REJECT": "F8CBAD",
+                                "TOXICITY_REJECT": "EA9999",
+                                "REPORTED_REJECT": "D9D2E9",
+                            }.get(v)
                         if color and PatternFill:
                             ws.cell(r, ci).fill = PatternFill(fill_type="solid", fgColor=color)
     return out_path
+
+
+def _build_simple_ranked_list(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    def _series(name, fallback=0):
+        if name not in out.columns:
+            return pd.Series([fallback] * len(out), index=out.index)
+        val = out[name]
+        if isinstance(val, pd.DataFrame):
+            return val.iloc[:, 0]
+        return val
+    ls = out.get("literature_status", pd.Series([""] * len(out))).fillna("")
+    exact = _series("exact_formula_evidence_count", None)
+    if exact is None or exact.isna().all():
+        exact = _series("exact_formula_hit_count", 0)
+    exact = pd.to_numeric(exact, errors="coerce").fillna(0)
+    perm = pd.to_numeric(_series("permutation_formula_evidence_count", 0), errors="coerce").fillna(0)
+    deep = _series("deep_dft_property_evidence_count", None)
+    if deep is None or deep.isna().all():
+        deep = _series("dft_formula_hit_count", 0)
+    deep = pd.to_numeric(deep, errors="coerce").fillna(0)
+    fam = pd.to_numeric(_series("family_level_evidence_count", 0), errors="coerce").fillna(0)
+    conflict = _series("prior_conflict_flag", False).fillna(False).astype(bool)
+    known = _series("known_reported_composition_flag", False).fillna(False).astype(bool)
+    reported_mask = ls.isin(["REPORTED_DFT", "REPORTED_NON_DFT", "DEEP_PRIOR_STUDY"]) | (exact > 0) | (perm > 0) | (deep > 0)
+    out["Unreported Score"] = 80
+    out.loc[reported_mask, "Unreported Score"] = 0
+    out.loc[conflict | known, "Unreported Score"] = 20
+    out.loc[(fam > 0) & ~reported_mask & ~(conflict | known), "Unreported Score"] = 50
+    out.loc[(ls == "HIGH_CONFIDENCE_NOT_FOUND") & ~reported_mask & ~(conflict | known) & (fam == 0), "Unreported Score"] = 100
+    out.loc[(ls == "MEDIUM_CONFIDENCE_NOT_FOUND") & ~reported_mask, "Unreported Score"] = 80
+    out["Unreported Status"] = "LIKELY_UNREPORTED"
+    out.loc[reported_mask, "Unreported Status"] = "REPORTED"
+    out.loc[conflict | known, "Unreported Status"] = "PRIOR_CONFLICT"
+    out.loc[(fam > 0) & ~(reported_mask | conflict | known), "Unreported Status"] = "FAMILY_REVIEW_NEEDED"
+    out.loc[out["Unreported Score"] == 100, "Unreported Status"] = "CLEAN_UNREPORTED"
+    st = pd.to_numeric(out.get("Stability"), errors="coerce")
+    out["Stability Grade"] = "UNKNOWN"
+    out.loc[st <= 0.05, "Stability Grade"] = "EXCELLENT"; out.loc[(st > 0.05) & (st <= 0.10), "Stability Grade"] = "GOOD"; out.loc[(st > 0.10) & (st <= 0.30), "Stability Grade"] = "MODERATE"; out.loc[st > 0.30, "Stability Grade"] = "POOR"
+    bg = pd.to_numeric(out.get("Band Gap (eV)"), errors="coerce")
+    out["Band Gap Grade"] = "UNKNOWN"
+    out.loc[bg == 0, "Band Gap Grade"] = "METALLIC_OR_ZERO"; out.loc[(bg >= 0.5) & (bg <= 1.5), "Band Gap Grade"] = "IDEAL"; out.loc[((bg >= 0.1) & (bg < 0.5)) | ((bg > 1.5) & (bg <= 2.0)), "Band Gap Grade"] = "GOOD"; out.loc[(bg > 2.0) & (bg <= 3.0), "Band Gap Grade"] = "MODERATE"; out.loc[bg > 3.0, "Band Gap Grade"] = "POOR"
+    out["Reported Paper Link"] = out.apply(lambda r: make_paper_link(r.get("paper_link_if_reported", "") or r.get("prior_best_url", "") or r.get("best_url", ""), r.get("prior_best_doi", "") or r.get("best_doi", "")), axis=1)
+    out["Toxicity / Practicality"] = out.get("practicality_tier", "").map({"PRACTICAL_PRIORITY": "PRACTICAL", "EXPENSIVE_RARE_REVIEW": "EXPENSIVE_RARE", "TOXICITY_REVIEW": "TOXIC", "RADIOACTIVE_REVIEW": "RADIOACTIVE", "HIGHLY_IMPRACTICAL": "HIGHLY_IMPRACTICAL"}).fillna("PRACTICAL")
+    for src, label in [("highly_toxic_elements", "TOXIC"), ("expensive_rare_elements", "EXPENSIVE_RARE"), ("radioactive_elements", "RADIOACTIVE")]:
+        vals = out.get(src, "").fillna("").astype(str).str.strip()
+        out.loc[vals != "", "Toxicity / Practicality"] = out.loc[vals != "", "Toxicity / Practicality"] + ": " + vals[vals != ""]
+    out["Final Decision"] = "MANUAL_REVIEW_REQUIRED"
+    out["Final Reason"] = "Not enough confidence for direct recommendation."
+    out.loc[out["Unreported Status"] == "REPORTED", ["Final Decision", "Final Reason"]] = ["REPORTED_REJECT", "Reported or formula-equivalent prior evidence found; do not claim novelty."]
+    out.loc[out["Unreported Status"] == "PRIOR_CONFLICT", ["Final Decision", "Final Reason"]] = ["MANUAL_REVIEW_REQUIRED", "Prior conflict or known reported composition found; manual citation check required."]
+    out.loc[out["Unreported Status"] == "FAMILY_REVIEW_NEEDED", ["Final Decision", "Final Reason"]] = ["MANUAL_REVIEW_REQUIRED", "Family-level literature exists; verify exact material before novelty claim."]
+    out.loc[out["Toxicity / Practicality"].str.contains("HIGHLY_IMPRACTICAL|RADIOACTIVE", na=False), ["Final Decision", "Final Reason"]] = ["TOXICITY_REJECT", "Radioactive or highly impractical element present."]
+    out.loc[out["Toxicity / Practicality"].str.contains("TOXIC", na=False), ["Final Decision", "Final Reason"]] = ["TOXICITY_REJECT", "Toxic/problematic element present."]
+    out.loc[st > 0.30, ["Final Decision", "Final Reason"]] = ["LOW_STABILITY_REJECT", "Likely unreported but stability is too weak for first-priority candidate."]
+    out.loc[out["Toxicity / Practicality"].str.contains("EXPENSIVE_RARE", na=False), ["Final Decision", "Final Reason"]] = ["BACKUP_ONLY", "Potentially useful but contains expensive/rare element; use as backup."]
+    best_mask = (out["Unreported Status"] == "CLEAN_UNREPORTED") & (st <= 0.10) & (out.get("practicality_tier", "") == "PRACTICAL_PRIORITY") & (bg >= 0.1) & (bg <= 2.0) & (out["Reported Paper Link"] == "")
+    out.loc[best_mask, ["Final Decision", "Final Reason"]] = ["BEST_NOVEL_CANDIDATE", "Clean unreported candidate with good stability, practical elements, and suitable band gap."]
+    good_mask = out["Final Decision"].eq("MANUAL_REVIEW_REQUIRED") & out["Unreported Status"].isin(["CLEAN_UNREPORTED", "LIKELY_UNREPORTED"]) & (st <= 0.20) & (out.get("practicality_tier", "") == "PRACTICAL_PRIORITY") & (bg >= 0.1) & (bg <= 3.0)
+    out.loc[good_mask, ["Final Decision", "Final Reason"]] = ["GOOD_NOVEL_CANDIDATE", "Promising candidate; manual literature verification recommended."]
+    out["_dp"] = pd.Categorical(out["Final Decision"], categories=FINAL_DECISION_SIMPLE_PRIORITY, ordered=True)
+    out["_tox"] = out["Toxicity / Practicality"].str.extract(r"^(PRACTICAL|EXPENSIVE_RARE|TOXIC|RADIOACTIVE|HIGHLY_IMPRACTICAL)")[0].map({"PRACTICAL":0,"EXPENSIVE_RARE":1,"TOXIC":2,"RADIOACTIVE":3,"HIGHLY_IMPRACTICAL":4}).fillna(9)
+    out["_bg"] = out["Band Gap Grade"].map({"IDEAL":0,"GOOD":1,"MODERATE":2,"POOR":3,"METALLIC_OR_ZERO":4,"UNKNOWN":5}).fillna(5)
+    out["_bgclose"] = (bg - 1.0).abs()
+    out["_linkblank"] = out["Reported Paper Link"].fillna("").eq("")
+    out = out.sort_values(["_dp","Unreported Score","Stability","_tox","_bg","_bgclose","_linkblank"], ascending=[True,False,True,True,True,True,False]).reset_index(drop=True)
+    out["Final Rank"] = range(1, len(out) + 1)
+    return out
+
+
+def _build_validation_checks(df: pd.DataFrame) -> pd.DataFrame:
+    best = df[df["Final Decision"] == "BEST_NOVEL_CANDIDATE"].copy()
+    return pd.DataFrame([
+        {"check": "number of BEST_NOVEL_CANDIDATE rows", "value": int((df["Final Decision"] == "BEST_NOVEL_CANDIDATE").sum())},
+        {"check": "number of GOOD_NOVEL_CANDIDATE rows", "value": int((df["Final Decision"] == "GOOD_NOVEL_CANDIDATE").sum())},
+        {"check": "number of MANUAL_REVIEW_REQUIRED rows", "value": int((df["Final Decision"] == "MANUAL_REVIEW_REQUIRED").sum())},
+        {"check": "number of BACKUP_ONLY rows", "value": int((df["Final Decision"] == "BACKUP_ONLY").sum())},
+        {"check": "number of REPORTED_REJECT rows", "value": int((df["Final Decision"] == "REPORTED_REJECT").sum())},
+        {"check": "warning: BEST has link", "value": int((best["Reported Paper Link"].fillna("") != "").sum())},
+        {"check": "warning: BEST stability > 0.10", "value": int((pd.to_numeric(best["Stability"], errors="coerce") > 0.10).sum())},
+        {"check": "warning: BEST toxicity not PRACTICAL", "value": int((~best["Toxicity / Practicality"].fillna("").str.startswith("PRACTICAL")).sum())},
+        {"check": "warning: BEST band gap outside 0.1-2.0", "value": int(((pd.to_numeric(best["Band Gap (eV)"], errors="coerce") < 0.1) | (pd.to_numeric(best["Band Gap (eV)"], errors="coerce") > 2.0)).sum())},
+        {"check": "warning: BEST unreported score < 100", "value": int((best["Unreported Score"] < 100).sum())},
+    ])
 
 
 def export_outputs(df_all: pd.DataFrame, output_dir: Path):

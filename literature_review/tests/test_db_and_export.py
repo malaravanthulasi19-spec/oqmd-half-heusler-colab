@@ -76,8 +76,12 @@ def test_master_workbook_created(tmp_path):
     out = export_material_screening_master(rows, hits=[], coverage=[], output_dir=tmp_path)
     assert out.exists()
     wb = pd.ExcelFile(out)
-    required = {"Final_Decision","Recommended_Novel","Strong_Manual_Verify","Backup_Candidates","Reported_or_Defer","All_Top10","All_Hits_Audit","Search_Coverage","Legend"}
+    required = {"Final_Ranked_List","Final_Decision","Recommended_Novel","Strong_Manual_Verify","Backup_Candidates","Reported_or_Defer","All_Top10","All_Hits_Audit","Search_Coverage","Search_Strategy","Validation_Checks","Legend"}
     assert required.issubset(set(wb.sheet_names))
+    assert wb.sheet_names[0] == "Final_Ranked_List"
+    final_ranked = pd.read_excel(out, sheet_name="Final_Ranked_List")
+    assert list(final_ranked.columns) == ["Final Rank","Material","Unreported Score","Unreported Status","Stability","Stability Grade","Toxicity / Practicality","Band Gap (eV)","Band Gap Grade","Reported Paper Link","Final Decision","Final Reason"]
+    assert final_ranked.columns.duplicated().sum() == 0
     final_df = pd.read_excel(out, sheet_name="Final_Decision")
     assert {"material_decision_status", "material_decision_reason", "final_recommendation"}.issubset(set(final_df.columns))
     assert {"literature_status", "evidence_reliability_tier", "unreported_priority_score", "prior_conflict_flag"}.issubset(set(final_df.columns))
@@ -94,3 +98,26 @@ def test_sorting_and_conflict_exclusion(tmp_path):
     assert fd.iloc[0]["Material"] == "Good"
     rec = pd.read_excel(out, sheet_name="Recommended_Novel")
     assert "TiFeTe" not in set(rec.get("Material", []))
+
+
+def test_final_ranked_decisions_and_validation(tmp_path):
+    rows = [
+        {"Material":"NovelGood","literature_status":"HIGH_CONFIDENCE_NOT_FOUND","practicality_tier":"PRACTICAL_PRIORITY","Stability":0.04,"Band Gap (eV)":1.0,"exact_formula_evidence_count":0,"permutation_formula_evidence_count":0,"deep_dft_property_evidence_count":0,"family_level_evidence_count":0},
+        {"Material":"Reported","literature_status":"REPORTED_DFT","Stability":0.02,"Band Gap (eV)":1.0,"best_doi":"10.1/x"},
+        {"Material":"LowStab","literature_status":"HIGH_CONFIDENCE_NOT_FOUND","practicality_tier":"PRACTICAL_PRIORITY","Stability":0.35,"Band Gap (eV)":1.1},
+        {"Material":"ToxicX","literature_status":"HIGH_CONFIDENCE_NOT_FOUND","practicality_tier":"TOXICITY_REVIEW","highly_toxic_elements":"Tl","Stability":0.05,"Band Gap (eV)":1.2},
+        {"Material":"RareX","literature_status":"HIGH_CONFIDENCE_NOT_FOUND","practicality_tier":"EXPENSIVE_RARE_REVIEW","expensive_rare_elements":"Pt","Stability":0.05,"Band Gap (eV)":1.3},
+        {"Material":"Conflict","literature_status":"HIGH_CONFIDENCE_NOT_FOUND","known_reported_composition_flag":True,"prior_best_doi":"10.2/y","Stability":0.05,"Band Gap (eV)":1.1},
+    ]
+    out = export_material_screening_master(rows, hits=[], coverage=[], output_dir=tmp_path)
+    fr = pd.read_excel(out, sheet_name="Final_Ranked_List")
+    assert fr.loc[fr["Material"]=="Reported","Final Decision"].iloc[0] == "REPORTED_REJECT"
+    assert fr.loc[fr["Material"]=="Reported","Reported Paper Link"].iloc[0].startswith("https://doi.org/")
+    assert fr.loc[fr["Material"]=="Conflict","Final Decision"].iloc[0] != "BEST_NOVEL_CANDIDATE"
+    assert fr.loc[fr["Material"]=="NovelGood","Final Decision"].iloc[0] == "BEST_NOVEL_CANDIDATE"
+    assert fr.loc[fr["Material"]=="LowStab","Final Decision"].iloc[0] == "LOW_STABILITY_REJECT"
+    assert fr.loc[fr["Material"]=="ToxicX","Final Decision"].iloc[0] == "TOXICITY_REJECT"
+    assert fr.loc[fr["Material"]=="RareX","Final Decision"].iloc[0] == "BACKUP_ONLY"
+    assert fr.loc[fr["Material"]=="NovelGood","Band Gap Grade"].iloc[0] == "IDEAL"
+    vc = pd.read_excel(out, sheet_name="Validation_Checks")
+    assert set(["number of BEST_NOVEL_CANDIDATE rows","number of GOOD_NOVEL_CANDIDATE rows","number of MANUAL_REVIEW_REQUIRED rows","number of BACKUP_ONLY rows","number of REPORTED_REJECT rows"]).issubset(set(vc["check"]))
