@@ -17,7 +17,7 @@ from .evidence_scoring import contains_any, score_reported_evidence, score_unrep
 from .constants import DFT_KEYWORDS, PROTOTYPE_KEYWORDS, ELEC_KEYWORDS, FORM_ENERGY_KEYWORDS
 from .classification import classify
 from .checkpoint import is_query_completed, mark_query_completed
-from .export import export_outputs
+from .export import export_outputs, export_material_screening_master
 from .material_selection_scoring import compute_material_selection_scores
 from .evidence_depth_scoring import compute_reported_depth_score
 from .keypaper_filters import detect_keypaper_context, compute_keypaper_depth_score
@@ -381,5 +381,8 @@ def run(
         })
 
     out_df = pd.DataFrame(rows)
-    export_outputs(out_df, Path(output_dir))
-    return {"materials_loaded": len(df), "db": str(db_path), "output_dir": str(output_dir), "status": "ok"}
+    out_dir = Path(output_dir)
+    export_outputs(out_df, out_dir)
+    master_path = export_material_screening_master(rows, hits=[], coverage=[], output_dir=out_dir)
+    print(f"Master workbook: {master_path}")
+    return {"materials_loaded": len(df), "db": str(db_path), "output_dir": str(output_dir), "master_workbook": str(master_path), "status": "ok"}
