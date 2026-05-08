@@ -26,10 +26,10 @@ def export_outputs(df_all: pd.DataFrame, output_dir: Path):
     ranking = df_all.copy()
     tier_vals = ranking["final_material_priority_tier"] if "final_material_priority_tier" in ranking.columns else pd.Series(["DEFER"] * len(ranking))
     ranking["_tier"] = pd.Categorical(tier_vals, categories=order, ordered=True)
-    for col in ["final_selection_score", "practicality_score", "stability_score", "literature_risk_penalty"]:
+    for col in ["final_selection_score", "keypaper_depth_score", "practicality_score", "stability_score", "literature_risk_penalty"]:
         if col not in ranking.columns:
             ranking[col] = 0
-    ranking = ranking.sort_values(["_tier", "final_selection_score", "practicality_score", "stability_score", "literature_risk_penalty"], ascending=[True, False, False, False, True]).drop(columns=["_tier"])
+    ranking = ranking.sort_values(["_tier", "final_selection_score", "keypaper_depth_score", "practicality_score", "stability_score", "literature_risk_penalty"], ascending=[True, False, True, False, False, True]).drop(columns=["_tier"])
     ranking.head(10).to_csv(output_dir / "11_top10_final_research_candidates.csv", index=False)
 
     xlsx_path = output_dir / "01_priority_unreported_candidates.xlsx"

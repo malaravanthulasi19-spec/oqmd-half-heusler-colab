@@ -20,6 +20,7 @@ from .checkpoint import is_query_completed, mark_query_completed
 from .export import export_outputs
 from .material_selection_scoring import compute_material_selection_scores
 from .evidence_depth_scoring import compute_reported_depth_score
+from .keypaper_filters import detect_keypaper_context, compute_keypaper_depth_score
 
 
 FALSE_POSITIVE_TERMS = [
@@ -97,8 +98,8 @@ def run(
     recall_second_pass: bool = False,
     calibration_passed: bool = True,
 ):
-    if search_profile == "candidate_screening_expanded" and top_n > 25:
-        print("Expanded search profile is expensive. Recommended top_n <= 25 unless explicitly confirmed.")
+    if search_profile == "candidate_screening_expanded" and top_n > 10:
+        print("Expanded search profile is expensive. Recommended top_n=10 first.")
     conn = connect(db_path)
     df = load_input(input_csv).head(top_n)
 
@@ -210,6 +211,9 @@ def run(
 
         valid_hits.sort(key=lambda x: x[0], reverse=True)
 
+        best_keypaper = {"keypaper_depth_score": 0, "keypaper_depth_tier": "SHALLOW_OR_NO_RELEVANT_EVIDENCE", "keypaper_context_groups_detected": 0, "keypaper_manual_warning": ""}
+        best_keypaper_ctx = {}
+
         best_depth = {
             "reported_depth_score": 0,
             "reported_depth_tier": "NO_VALID_EVIDENCE",
@@ -240,6 +244,12 @@ def run(
             })
             if depth["reported_depth_score"] > best_depth["reported_depth_score"]:
                 best_depth = depth
+
+            kctx = detect_keypaper_context(txt)
+            kdepth = compute_keypaper_depth_score({**kctx, "formula_level_evidence_found": bool(exact or perm), "false_positive_flag": _is_false_positive_text(txt) and not (exact or perm), "evidence_tier": "TIER_1_ELEMENT_SYSTEM_WEAK" if tier_name == "element_system_weak" else "TIER_3_FORMULA_LEVEL"})
+            if kdepth["keypaper_depth_score"] > best_keypaper["keypaper_depth_score"]:
+                best_keypaper = kdepth
+                best_keypaper_ctx = kctx
 
         reported = score_reported_evidence(feat)
         unreported = score_unreported_confidence({
@@ -282,11 +292,13 @@ def run(
             label, reason = "incomplete_search_retry_needed", "PIPELINE_NOT_CALIBRATED: Do not use not_found_after_protocol as novelty evidence until validation passes."
         else:
             label, reason = classify({"reported_evidence_score": reported, "unreported_confidence_score": unreported}, complete, False)
-        if best_depth["reported_depth_score"] >= 75:
-            if formula_level_evidence_found and dft_formula_hit_count > 0:
-                label, reason = "reported_dft", "deep DFT/property depth evidence"
+        if best_keypaper["keypaper_depth_score"] >= 80:
+            if formula_level_evidence_found and dft_formula_hit_count > 0 and (input_half_heusler_verified or literature_half_heusler_context_found):
+                label, reason = "reported_dft", "deep key-paper-style DFT/property study detected"
             else:
-                label, reason = "ambiguous_manual_review", "deep literature evidence requires manual review"
+                label, reason = "ambiguous_manual_review", "deep key-paper-style literature evidence requires manual review"
+        elif best_keypaper["keypaper_depth_score"] >= 60:
+            unreported = max(0, unreported - 20)
         elif best_depth["reported_depth_score"] >= 50 and label == "not_found_after_protocol":
             label, reason = "ambiguous_manual_review", "DFT-level depth evidence requires manual verification"
             unreported = max(0, unreported - 35)
@@ -363,6 +375,8 @@ def run(
             "property_depth_score": best_depth["property_depth_score"],
             "false_positive_penalty": best_depth["false_positive_penalty"],
             "manual_warning": best_depth["manual_warning"],
+            **best_keypaper,
+            **best_keypaper_ctx,
             **score_cols,
         })
 
