@@ -107,3 +107,28 @@ def test_completed_queries_skipped(tmp_path, monkeypatch):
     first = calls['n']
     run(top_n=10, input_csv=inp, db_path=db, output_dir=out_dir)
     assert calls['n'] == first
+
+
+def test_half_heusler_guard_for_reported_dft(tmp_path, monkeypatch):
+    class C(_BaseClient):
+        def search(self, query, **kwargs):
+            return [{"title": "TiNiSb DFT study", "snippet": "first principles electronic structure", "doi": "10.1/x", "url": "u"}]
+
+    monkeypatch.setattr('literature_review.pipeline.GoogleScholarClient', lambda: C())
+    monkeypatch.setattr('literature_review.pipeline.OpenAlexClient', lambda: C())
+    monkeypatch.setattr('literature_review.pipeline.SemanticScholarClient', lambda: C())
+    monkeypatch.setattr('literature_review.pipeline.CrossrefClient', lambda: C())
+    inp = tmp_path / 'input.csv'
+    pd.DataFrame([{"Material": "TiNiSb"}]).to_csv(inp, index=False)
+    run(top_n=1, input_csv=inp, db_path=tmp_path / "d.sqlite3", output_dir=tmp_path / "out")
+    df = pd.read_csv(tmp_path / "out/05_all_hits_audit.csv")
+    assert df.iloc[0]["Automated Status"] == "ambiguous_manual_review"
+
+
+def test_half_heusler_input_metadata_allows_reported_dft(tmp_path, monkeypatch):
+    _patch_clients(monkeypatch)
+    inp = tmp_path / 'input.csv'
+    pd.DataFrame([{"Material": "TiNiSb", "Prototype": "C1b", "Space Group": "F-43m"}]).to_csv(inp, index=False)
+    run(top_n=1, input_csv=inp, db_path=tmp_path / "d2.sqlite3", output_dir=tmp_path / "out2")
+    df = pd.read_csv(tmp_path / "out2/05_all_hits_audit.csv")
+    assert df.iloc[0]["Automated Status"] == "reported_dft"
