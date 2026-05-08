@@ -67,3 +67,28 @@ def test_safe_stop_does_not_erase_progress(tmp_path: Path) -> None:
     result = d.run(base_filter=base)
     assert result.safe_stop is True
     assert db.row_count() == 1
+
+
+def test_global_mode_skips_fallback_jobs(tmp_path: Path) -> None:
+    base = 'G'
+    fallback_filter = f'{base} AND element_set=Ac'
+    client = StubClient({base: [[{'entry_id': 1}], []], fallback_filter: [[{'entry_id': 2}], []]})
+    db = OQMDDatabase(tmp_path / 't.sqlite3')
+    d = OQMDDownloader(db, client)
+
+    d.run(base_filter=base, search_mode='global')
+
+    assert db.row_count() == 1
+
+
+def test_fallback_mode_skips_global_query(tmp_path: Path) -> None:
+    base = 'F'
+    fallback_filter = f'{base} AND element_set=Ac'
+    client = StubClient({fallback_filter: [[{'entry_id': 2}], []]})
+    db = OQMDDatabase(tmp_path / 't.sqlite3')
+    d = OQMDDownloader(db, client)
+
+    d.run(base_filter=base, search_mode='fallback')
+
+    assert (base, 0) not in client.calls
+    assert db.row_count() == 1
