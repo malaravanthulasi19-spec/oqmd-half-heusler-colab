@@ -53,7 +53,7 @@ def _base_row(**kwargs):
 
 def test_assign_material_decision_status_rules():
     assert assign_material_decision_status(_base_row())["material_decision_status"] == "RECOMMENDED_NOVEL_CANDIDATE"
-    assert assign_material_decision_status(_base_row(final_selection_score=70))["material_decision_status"] == "STRONG_NOVEL_CANDIDATE_MANUAL_VERIFY"
+    assert assign_material_decision_status(_base_row(Stability=0.15))["material_decision_status"] == "STRONG_NOVEL_CANDIDATE_MANUAL_VERIFY"
     assert assign_material_decision_status(_base_row(Stability=0.35))["material_decision_status"] == "NOVEL_BUT_LOW_STABILITY"
     assert assign_material_decision_status(_base_row(practicality_tier="EXPENSIVE_RARE_REVIEW"))["material_decision_status"] == "EXPENSIVE_RARE_BACKUP"
     assert assign_material_decision_status(_base_row(practicality_tier="TOXICITY_REVIEW"))["material_decision_status"] == "TOXICITY_REVIEW_DEFER"
@@ -61,6 +61,7 @@ def test_assign_material_decision_status_rules():
     assert reported["material_decision_status"] == "REPORTED_DFT_DEFER" and reported["paper_link_if_reported"].startswith("https://doi.org/")
     assert assign_material_decision_status(_base_row(reported_depth_score=80))["material_decision_status"] == "DEEP_PRIOR_STUDY_DEFER"
     assert assign_material_decision_status(_base_row(source_error=True))["material_decision_status"] == "INCOMPLETE_SEARCH_RETRY"
+    assert assign_material_decision_status(_base_row(Material="TiFeTe"))["material_decision_status"] == "PRIOR_RUN_CONFLICT_MANUAL_REVIEW"
 
 
 def test_make_paper_link():
@@ -79,3 +80,17 @@ def test_master_workbook_created(tmp_path):
     assert required.issubset(set(wb.sheet_names))
     final_df = pd.read_excel(out, sheet_name="Final_Decision")
     assert {"material_decision_status", "material_decision_reason", "final_recommendation"}.issubset(set(final_df.columns))
+    assert {"literature_status", "evidence_reliability_tier", "unreported_priority_score", "prior_conflict_flag"}.issubset(set(final_df.columns))
+
+
+def test_sorting_and_conflict_exclusion(tmp_path):
+    rows = [
+        {"Rank": 1, "Material": "Good", "Automated Status": "not_found_after_protocol", "novelty_confidence_tier": "HIGH_CONFIDENCE_UNREPORTED", "practicality_tier": "PRACTICAL_PRIORITY", "Stability": 0.05, "Band Gap (eV)": 1.0, "formula_level_evidence_found": False, "exact_formula_hit_count": 0, "dft_formula_hit_count": 0, "google_scholar_checked": True, "openalex_checked": True, "semantic_scholar_checked": True},
+        {"Rank": 2, "Material": "TiFeTe", "Automated Status": "not_found_after_protocol", "novelty_confidence_tier": "HIGH_CONFIDENCE_UNREPORTED", "practicality_tier": "PRACTICAL_PRIORITY", "Stability": 0.05, "Band Gap (eV)": 1.0, "formula_level_evidence_found": False, "exact_formula_hit_count": 0, "dft_formula_hit_count": 0, "google_scholar_checked": True, "openalex_checked": True, "semantic_scholar_checked": True},
+        {"Rank": 3, "Material": "BadStability", "Automated Status": "not_found_after_protocol", "novelty_confidence_tier": "HIGH_CONFIDENCE_UNREPORTED", "practicality_tier": "PRACTICAL_PRIORITY", "Stability": 0.7, "Band Gap (eV)": 1.0, "formula_level_evidence_found": False, "exact_formula_hit_count": 0, "dft_formula_hit_count": 0, "google_scholar_checked": True, "openalex_checked": True, "semantic_scholar_checked": True},
+    ]
+    out = export_material_screening_master(rows, hits=[], coverage=[], output_dir=tmp_path)
+    fd = pd.read_excel(out, sheet_name="Final_Decision")
+    assert fd.iloc[0]["Material"] == "Good"
+    rec = pd.read_excel(out, sheet_name="Recommended_Novel")
+    assert "TiFeTe" not in set(rec.get("Material", []))
