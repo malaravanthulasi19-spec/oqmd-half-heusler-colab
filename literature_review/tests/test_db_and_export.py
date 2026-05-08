@@ -34,7 +34,7 @@ def test_top10_export_columns_and_sorting(tmp_path):
     assert out.iloc[0]["Material"] == "A"
 
 OPENPYXL_AVAILABLE = pytest.importorskip("openpyxl", reason="openpyxl required for workbook validation")
-from literature_review.export import assign_material_decision_status, make_paper_link, export_material_screening_master
+from literature_review.export import assign_material_decision_status, make_paper_link, export_material_screening_master, _build_simple_ranked_list, dedupe_dataframe_columns
 
 
 def _base_row(**kwargs):
@@ -121,3 +121,41 @@ def test_final_ranked_decisions_and_validation(tmp_path):
     assert fr.loc[fr["Material"]=="NovelGood","Band Gap Grade"].iloc[0] == "IDEAL"
     vc = pd.read_excel(out, sheet_name="Validation_Checks")
     assert set(["number of BEST_NOVEL_CANDIDATE rows","number of GOOD_NOVEL_CANDIDATE rows","number of MANUAL_REVIEW_REQUIRED rows","number of BACKUP_ONLY rows","number of REPORTED_REJECT rows"]).issubset(set(vc["check"]))
+
+
+def test_duplicate_columns_helpers_and_sheets(tmp_path):
+    rows = [{
+        "Rank": 1,
+        "Material": "ABC",
+        "Band Gap (eV)": 1.1,
+        "Stability": 0.05,
+        "Automated Status": "not_found_after_protocol",
+        "novelty_confidence_tier": "HIGH_CONFIDENCE_UNREPORTED",
+        "practicality_tier": "PRACTICAL_PRIORITY",
+        "material_decision_status": "RECOMMENDED_NOVEL_CANDIDATE",
+        "material_decision_reason": "preexisting",
+        "final_recommendation": "preexisting",
+    }]
+    out = export_material_screening_master(rows, hits=[], coverage=[], output_dir=tmp_path)
+    wb = pd.ExcelFile(out)
+    for sheet in ["Final_Ranked_List", "Final_Decision", "All_Top10"]:
+        sh = pd.read_excel(out, sheet_name=sheet)
+        assert sh.columns.duplicated().sum() == 0
+
+
+def test_build_simple_ranked_list_handles_duplicate_cols():
+    base = pd.DataFrame([
+        {"Material": "Dup", "Stability": 0.05, "Band Gap (eV)": 1.0, "practicality_tier": "PRACTICAL_PRIORITY", "literature_status": "HIGH_CONFIDENCE_NOT_FOUND"}
+    ])
+    dup = pd.concat([base, base[["Stability", "Band Gap (eV)"]]], axis=1)
+    out = _build_simple_ranked_list(dup)
+    assert out.columns.duplicated().sum() == 0
+    assert out.loc[0, "Band Gap Grade"] == "IDEAL"
+    assert out.loc[0, "Stability Grade"] == "EXCELLENT"
+
+
+def test_dedupe_dataframe_columns_removes_duplicates():
+    df = pd.DataFrame([[1,2]], columns=["A","A"])
+    deduped = dedupe_dataframe_columns(df)
+    assert list(deduped.columns) == ["A"]
+
