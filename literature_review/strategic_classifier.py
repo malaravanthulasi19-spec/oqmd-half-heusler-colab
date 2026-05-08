@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .composition_equivalence import canonical_element_set
+
 KNOWN_REPORTED_MATERIALS = {
     "TiFeTe": {
         "doi": "10.1039/d5cp04054j",
@@ -8,6 +10,14 @@ KNOWN_REPORTED_MATERIALS = {
     }
 }
 
+
+
+KNOWN_REPORTED_COMPOSITIONS = {
+    canonical_element_set("ScCoTe"): {"status": "REPORTED_DFT", "doi": "10.1039/D3CP01478A", "title": "Investigation of the electronic structure, mechanical, and thermoelectric properties of novel semiconductor compounds: XYTe (X = Ti/Sc; Y = Fe/Co)"},
+    canonical_element_set("TiFeTe"): {"status": "REPORTED_DFT", "doi": "10.1039/D3CP01478A", "title": "Investigation of the electronic structure, mechanical, and thermoelectric properties of novel semiconductor compounds: XYTe (X = Ti/Sc; Y = Fe/Co)"},
+    canonical_element_set("ZrFeTe"): {"status": "REPORTED_DFT", "doi": "10.1007/s11664-023-10369-y", "title": "Stability and Thermoelectric Properties of FeZrTe Alloy"},
+    canonical_element_set("ZrTeRu"): {"status": "REPORTED_DFT", "doi": "10.1088/1361-648X/ab9d49", "title": "Intrinsically high thermoelectric figure of merit of half-Heusler ZrRuTe"},
+}
 
 def _f(v, default=None):
     try:
@@ -51,10 +61,16 @@ def load_prior_material_evidence(conn, material: str) -> dict:
         "prior_exact_formula_hit_count": 0,
         "prior_dft_formula_hit_count": 0,
         "prior_evidence_sources": "",
+        "known_reported_composition_flag": False,
     }
+    cset = canonical_element_set(material)
     if material in KNOWN_REPORTED_MATERIALS:
         item = KNOWN_REPORTED_MATERIALS[material]
-        return {**base, "prior_conflict_flag": True, "prior_reported_status": "KNOWN_REPORTED_OVERRIDE", "prior_best_doi": item.get("doi", ""), "prior_best_url": item.get("url", "")}
+        return {**base, "prior_conflict_flag": True, "prior_reported_status": "KNOWN_REPORTED_OVERRIDE", "known_reported_composition_flag": True, "prior_best_doi": item.get("doi", ""), "prior_best_url": item.get("url", "")}
+    if cset in KNOWN_REPORTED_COMPOSITIONS:
+        item = KNOWN_REPORTED_COMPOSITIONS[cset]
+        doi = item.get("doi", "")
+        return {**base, "prior_conflict_flag": True, "known_reported_composition_flag": True, "prior_reported_status": item.get("status", "KNOWN_REPORTED_OVERRIDE"), "prior_best_paper_title": item.get("title", ""), "prior_best_doi": doi, "prior_best_url": f"https://doi.org/{doi}" if doi else ""}
     if conn is None:
         return base
     row = conn.execute("SELECT automated_status, best_matching_paper, doi, url FROM classifications WHERE material=?", (material,)).fetchone()
