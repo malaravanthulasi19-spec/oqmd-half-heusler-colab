@@ -18,6 +18,7 @@ from .constants import DFT_KEYWORDS, PROTOTYPE_KEYWORDS, ELEC_KEYWORDS, FORM_ENE
 from .classification import classify
 from .checkpoint import is_query_completed, mark_query_completed
 from .export import export_outputs
+from .material_selection_scoring import compute_material_selection_scores
 from .evidence_depth_scoring import compute_reported_depth_score
 
 
@@ -293,6 +294,7 @@ def run(
         print(f"  hit count: {len(all_hits)}")
         print(f"  final label: {label}")
         best_hit = valid_hits[0] if valid_hits and valid_hits[0][1] != "element_system_weak" else None
+        score_cols = compute_material_selection_scores({**r.to_dict(), **best_depth, "Automated Status": label, "formula_level_evidence_found": formula_level_evidence_found, "exact_formula_hit_count": exact_formula_hit_count, "dft_formula_hit_count": dft_formula_hit_count, "google_scholar_checked": cov.google_scholar_checked, "openalex_checked": cov.openalex_checked, "semantic_scholar_checked": cov.semantic_scholar_checked, "source_error": cov.source_error, "best_paper_title": best_hit[2].title if best_hit else "", "best_doi": best_hit[2].doi if best_hit else ""})
         rows.append({
             "Rank": r.get("Rank"),
             "Material": material,
@@ -344,6 +346,7 @@ def run(
             "property_depth_score": best_depth["property_depth_score"],
             "false_positive_penalty": best_depth["false_positive_penalty"],
             "manual_warning": best_depth["manual_warning"],
+            **score_cols,
         })
 
     out_df = pd.DataFrame(rows)
