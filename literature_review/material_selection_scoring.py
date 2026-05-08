@@ -34,6 +34,7 @@ def compute_material_selection_scores(row: dict) -> dict:
     space_group = str(row.get("Space Group", ""))
     material = str(row.get("Material", ""))
     depth = _to_float(row.get("reported_depth_score")) or 0.0
+    keypaper_depth = _to_float(row.get("keypaper_depth_score")) or 0.0
     stability = _to_float(row.get("Stability"))
     d_e = _to_float(row.get("Formation Energy / ΔE"))
     band_gap = _to_float(row.get("Band Gap (eV)"))
@@ -51,6 +52,7 @@ def compute_material_selection_scores(row: dict) -> dict:
     novelty -= 35 if status == "ambiguous_manual_review" else 0
     novelty -= 30 if _to_bool(row.get("source_error")) else 0
     novelty -= 50 if depth >= 75 else 30 if depth >= 50 else 0
+    novelty -= 45 if keypaper_depth >= 80 else 25 if keypaper_depth >= 60 else 0
     novelty = _clamp(novelty)
 
     proto_half = any(k in prototype.lower() for k in ["c1b", "halfheusler", "half-heusler", "mgagas"])
@@ -120,7 +122,7 @@ def compute_material_selection_scores(row: dict) -> dict:
     app = 0
     if band_gap is not None:
         app += 20 if 0.05 <= band_gap < 1.5 else 15 if 1.5 <= band_gap <= 3.0 else 5 if 3.0 < band_gap <= 5.0 else -30 if band_gap > 5.0 else 0
-    for k,w in [("has_thermoelectric_context",15),("has_half_metal_context",20),("has_ferromagnetic_context",15),("has_spintronic_context",10),("has_dft_context",10),("has_phonon_context",10),("has_mechanical_stability_context",10),("has_stability_context",10)]:
+    for k,w in [("has_thermoelectric_context",15),("has_half_metal_context",20),("has_ferromagnetic_context",15),("has_spintronic_context",10),("has_dft_context",10),("has_phonon_context",10),("has_mechanical_stability_context",10),("has_stability_context",10),("has_keypaper_thermoelectric_context",15),("has_keypaper_magnetic_spintronic_context",15),("has_keypaper_phonon_context",10),("has_keypaper_mechanical_context",10),("has_keypaper_electronic_context",10)]:
         app += w if _to_bool(row.get(k)) else 0
     text = (str(row.get("property_groups_detected", "")) + " " + str(row.get("best_paper_title", ""))).lower()
     if any(t in text for t in ["seebeck","zt","power factor","thermal conductivity"]): app += 10
@@ -131,6 +133,7 @@ def compute_material_selection_scores(row: dict) -> dict:
 
     lit_pen = 0
     lit_pen += 80 if depth >= 75 else 0
+    lit_pen += 85 if keypaper_depth >= 80 else 45 if keypaper_depth >= 60 else 0
     lit_pen += 60 if status == "reported_dft" else 45 if status == "reported_non_dft" else 35 if status == "ambiguous_manual_review" else 0
     lit_pen += 25 if _to_bool(row.get("formula_level_evidence_found")) else 0
     lit_pen += 20 if (_to_float(row.get("exact_formula_hit_count")) or 0) > 0 else 0
@@ -148,7 +151,7 @@ def compute_material_selection_scores(row: dict) -> dict:
 
     final = _clamp(0.25*novelty + 0.20*stability_score + 0.20*practicality + 0.15*validity + 0.15*app + 0.05*meta - 0.25*lit_pen)
 
-    if final < 35 or practicality_tier in {"HIGHLY_IMPRACTICAL","RADIOACTIVE_REVIEW"} or depth >= 75 or status == "reported_dft":
+    if final < 35 or practicality_tier in {"HIGHLY_IMPRACTICAL","RADIOACTIVE_REVIEW"} or depth >= 75 or keypaper_depth >= 80 or status == "reported_dft":
         tier = "DEFER"
     elif final >= 80 and practicality_tier == "PRACTICAL_PRIORITY" and novelty >= 70 and validity >= 70 and stability_score >= 60 and lit_pen < 30 and stability is not None and stability <= 0.30 and (proto_half or space_group=="F-43m"):
         tier = "TOP_RESEARCH_PRIORITY"
